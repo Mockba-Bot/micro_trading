@@ -12,8 +12,8 @@ app = FastAPI(
 )
 
 # Include the backtest routes
-app.include_router(backtest_router, prefix="/api/v1")
-app.include_router(status_router, prefix="/api/v1")
+app.include_router(backtest_router, prefix="/api/v1/backtest")
+app.include_router(status_router, prefix="/api/v1/backtest")
 
 # run update of tables
 # alembic revision --autogenerate -m "initial tables"
