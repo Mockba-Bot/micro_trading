@@ -15,6 +15,12 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import requests
 
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 import warnings
 warnings.filterwarnings("ignore")
 # Load environment variables from the .env file
@@ -39,18 +45,36 @@ def get_last_non_zero_crypto(data):
     else:
         return 0  # or handle it as needed, e.g., None    
 # Def get all Binance
-import requests
+
+async def send_bot_message(token, message):
+    url = f"{MICRO_CENTRAL_URL}/send_notification"
+    payload = {
+        "token": token,
+        "message": message
+    }
+    headers = {
+        "Token": token
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                response.raise_for_status()
 
 async def get_all_binance(pair, timeframe, token, save=False):
-    url = f"{MICRO_CORE_URL}/historical-data"
+    url = f"{MICRO_CENTRAL_URL}/historical-data"
     payload = {
         "symbol": pair,
         "kline_size": timeframe,
         "token": token,
         "save": save
     }
+    headers = {
+        "Token": token
+    }
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as response:
+        async with session.post(url, json=payload, headers=headers) as response:
             if response.status == 200:
                 return await response.json()
             else:
@@ -59,15 +83,18 @@ async def get_all_binance(pair, timeframe, token, save=False):
 
 
 # Fetch historical data from the database
-async def get_historical_data(pair, timeframe, values):
-    url = f"{MICRO_CORE_URL}/query-historical-data"
+async def get_historical_data(token, pair, timeframe, values):
+    url = f"{MICRO_CENTRAL_URL}/query-historical-data"
     payload = {
         "pair": pair,
         "timeframe": timeframe,
         "values": values
     }
+    headers = {
+        "Token": token
+    }
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as response:
+        async with session.post(url, json=payload, headers=headers) as response:
             if response.status == 200:
                 data = await response.json()
                 df = pd.DataFrame(data)
@@ -80,7 +107,7 @@ async def get_historical_data(pair, timeframe, values):
                 
                 return df
             else:
-                response.raise_for_status()
+                logger.error(f"Error fetching historical data: {response.status} {await response.text()}")
 
 # Add technical indicators to the data
 def add_indicators(data):
@@ -278,7 +305,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
 
     # Fetch historical data and add technical indicators
     await get_all_binance(pair, timeframe, token, save=True)
-    data = await get_historical_data(pair, timeframe, train_values)
+    data = await get_historical_data(token, pair, timeframe, train_values)
     data = add_indicators(data)
 
     # Ensure the return column is calculated and present in the DataFrame
@@ -293,7 +320,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         features = ['rsi', 'macd', 'macd_signal', 'macd_diff', 'bollinger_hband', 'bollinger_mavg', 'bollinger_lband', 'ema', 'ATR']
         # Update the model with new data if train_values != initial_training_values
         if train_values != initial_training_values:
-            new_data = await get_historical_data(pair, timeframe, values)
+            new_data = await get_historical_data(token, pair, timeframe, values)
             new_data = add_indicators(new_data)
             model = update_model(model, new_data, features)
     else:
@@ -333,7 +360,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         f"You have selected a gain threshold of {gain_threshold * 100:.2f}% and a stop-loss threshold of {stop_loss_threshold * 100:.2f}%.\n"
         f"Execution time: {datetime.now() - start}"
     )
-
+    await send_bot_message(token, result_explanation)
     # Plot the results and save the plot as PNG
     plot_backtest_results(backtest_result, pair, output_file)
 

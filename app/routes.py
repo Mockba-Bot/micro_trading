@@ -18,7 +18,7 @@ class BacktestRequest(BaseModel):
 backtest_router = APIRouter()
 status_router = APIRouter()
 
-@backtest_router.post("/backtest/")
+@backtest_router.post("/backtest")
 async def run_backtest_api(request: BacktestRequest):
     """
     Run the backtest with the provided parameters.
