@@ -14,6 +14,8 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import requests
+import aioredis
+import json
 
 import logging
 
@@ -32,7 +34,11 @@ MODEL_PATH = os.getenv("MODEL_PATH")
 FILES_PATH = os.getenv("FILES_PATH")
 CPU_COUNT = os.getenv("CPU_COUNT")
 MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
 cpu_count = os.cpu_count()-int(CPU_COUNT)
+
+# Initialize Redis connection
+redis = aioredis.from_url(REDIS_URL, decode_responses=True)
 
 # Set dynamic model path based on pair and timeframe
 def get_model_path(pair, timeframe):
@@ -63,6 +69,13 @@ async def send_bot_message(token, message):
                 response.raise_for_status()
 
 async def get_all_binance(pair, timeframe, token, save=False):
+    cache_key = f"binance:{pair}:{timeframe}:{token}:{save}"
+    
+    # Check if the data exists in Redis
+    cached_data = await redis.get(cache_key)
+    if cached_data:
+        return json.loads(cached_data)
+    
     url = f"{MICRO_CENTRAL_URL}/historical-data"
     payload = {
         "symbol": pair,
@@ -76,14 +89,25 @@ async def get_all_binance(pair, timeframe, token, save=False):
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers=headers) as response:
             if response.status == 200:
-                return await response.json()
+                data = await response.json()
+                
+                # Store the data in Redis for 4 hours (14400 seconds)
+                await redis.setex(cache_key, 14400, json.dumps(data))
+                
+                return data
             else:
                 response.raise_for_status()
 
-
-
 # Fetch historical data from the database
 async def get_historical_data(token, pair, timeframe, values):
+    cache_key = f"historical_data:{pair}:{timeframe}:{values}:{token}"
+    
+    # Check if the data exists in Redis
+    cached_data = await redis.get(cache_key)
+    if cached_data:
+        data = pd.read_json(cached_data)
+        return data
+    
     url = f"{MICRO_CENTRAL_URL}/query-historical-data"
     payload = {
         "pair": pair,
@@ -105,9 +129,13 @@ async def get_historical_data(token, pair, timeframe, values):
                 df['low'] = pd.to_numeric(df['low'])
                 df['volume'] = pd.to_numeric(df['volume'])
                 
+                # Store the data in Redis for 4 hours (14400 seconds)
+                await redis.setex(cache_key, 14400, df.to_json())
+                
                 return df
             else:
                 logger.error(f"Error fetching historical data: {response.status} {await response.text()}")
+                response.raise_for_status()
 
 # Add technical indicators to the data
 def add_indicators(data):
