@@ -14,7 +14,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import requests
-import aioredis
+import redis.asyncio as redis
 import json
 
 import logging
@@ -38,7 +38,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
 cpu_count = os.cpu_count()-int(CPU_COUNT)
 
 # Initialize Redis connection
-redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 # Set dynamic model path based on pair and timeframe
 def get_model_path(pair, timeframe):
@@ -72,7 +72,7 @@ async def get_all_binance(pair, timeframe, token, save=False):
     cache_key = f"binance:{pair}:{timeframe}:{token}:{save}"
     
     # Check if the data exists in Redis
-    cached_data = await redis.get(cache_key)
+    cached_data = await redis_client.get(cache_key)
     if cached_data:
         return json.loads(cached_data)
     
@@ -92,7 +92,7 @@ async def get_all_binance(pair, timeframe, token, save=False):
                 data = await response.json()
                 
                 # Store the data in Redis for 4 hours (14400 seconds)
-                await redis.setex(cache_key, 14400, json.dumps(data))
+                await redis_client.setex(cache_key, 14400, json.dumps(data))
                 
                 return data
             else:
@@ -103,7 +103,7 @@ async def get_historical_data(token, pair, timeframe, values):
     cache_key = f"historical_data:{pair}:{timeframe}:{values}:{token}"
     
     # Check if the data exists in Redis
-    cached_data = await redis.get(cache_key)
+    cached_data = await redis_client.get(cache_key)
     if cached_data:
         data = pd.read_json(cached_data)
         return data
@@ -130,7 +130,7 @@ async def get_historical_data(token, pair, timeframe, values):
                 df['volume'] = pd.to_numeric(df['volume'])
                 
                 # Store the data in Redis for 4 hours (14400 seconds)
-                await redis.setex(cache_key, 14400, df.to_json())
+                await redis_client.setex(cache_key, 14400, df.to_json())
                 
                 return df
             else:
