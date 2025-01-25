@@ -24,12 +24,6 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
 )
 
-celery_app.conf.task_queues = {
-    "backtest": {"exchange": "backtest", "routing_key": "backtest"},
-}
-
-celery_app.conf.task_default_queue = "backtest"  # Default queue for this worker
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
