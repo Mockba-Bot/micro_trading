@@ -74,6 +74,7 @@ async def get_all_binance(pair, timeframe, token, save=False):
     # Check if the data exists in Redis
     cached_data = await redis_client.get(cache_key)
     if cached_data:
+        print("cached_data for binance")
         return json.loads(cached_data)
     
     url = f"{MICRO_CENTRAL_URL}/historical-data"
@@ -105,6 +106,7 @@ async def get_historical_data(token, pair, timeframe, values):
     # Check if the data exists in Redis
     cached_data = await redis_client.get(cache_key)
     if cached_data:
+        print("cached_data for historical_data")
         data = pd.read_json(cached_data)
         return data
     
