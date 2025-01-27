@@ -354,6 +354,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             new_data = add_indicators(new_data)
             model = update_model(model, new_data, features)
     else:
+        print("No model found, Training model")
         model, features = train_model(data, model_path)
 
     # Backtest the strategy with stop-loss, fees, and gain threshold
