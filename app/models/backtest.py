@@ -36,8 +36,6 @@ MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
 cpu_count = os.cpu_count()-int(CPU_COUNT)
 
-os.makedirs(MODEL_PATH, exist_ok=True)
-os.makedirs(FILES_PATH, exist_ok=True)
 
 # Initialize Redis connection
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
