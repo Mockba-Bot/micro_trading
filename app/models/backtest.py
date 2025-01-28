@@ -29,7 +29,6 @@ warnings.filterwarnings("ignore")
 load_dotenv(dotenv_path=".env.micro.backtest")
 
 # Access the environment variables
-PATH_OPERATIONS = os.getenv("PATH_OPERATIONS")
 MODEL_PATH = os.getenv("MODEL_PATH")
 FILES_PATH = os.getenv("FILES_PATH")
 CPU_COUNT = os.getenv("CPU_COUNT")
@@ -37,8 +36,8 @@ MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
 cpu_count = os.cpu_count()-int(CPU_COUNT)
 
-os.makedirs(PATH_OPERATIONS, exist_ok=True)
 os.makedirs(MODEL_PATH, exist_ok=True)
+os.makedirs(FILES_PATH, exist_ok=True)
 
 # Initialize Redis connection
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
