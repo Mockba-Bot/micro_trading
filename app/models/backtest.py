@@ -347,29 +347,22 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
     # Generate dynamic file names
     model_path = get_model_path(pair, timeframe)
     output_file = f'{FILES_PATH}/backtest_results_{pair}_{timeframe}_{token}.xlsx'
-    logger.info(f"Model path: {model_path}")
-    logger.info(f"Output file: {output_file}")
 
     # If the model does not exist, train it from January 2023
     end_date = values.split('|')[1]
     initial_training_values = f'2023-01-01|{end_date}'
     train_values = initial_training_values if not os.path.exists(model_path) else values
-    logger.info(f"Training values: {train_values}")
 
     # Fetch historical data and add technical indicators
-    logger.info("Fetching historical data from Binance")
     await get_all_binance(pair, timeframe, token, save=True)
     data = await get_historical_data(token, pair, timeframe, train_values)
-    logger.info("Adding technical indicators")
     data = add_indicators(data)
 
     # Ensure the return column is calculated and present in the DataFrame
     data['return'] = data['close'].pct_change().shift(-1)
-    logger.info("Calculated return column")
 
     # Calculate initial amount of crypto based on initial investment
     initial_crypto_amount = initial_investment / data['close'].iloc[0]
-    logger.info(f"Initial crypto amount: {initial_crypto_amount:.6f}")
 
     # Check if a trained model exists and load it, otherwise train a new one
     if os.path.exists(model_path):
@@ -387,38 +380,31 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         model, features = train_model(data, model_path)
 
     # Backtest the strategy with stop-loss, fees, and gain threshold
-    logger.info("Starting backtest strategy")
     backtest_result = await backtest(data, model, features, initial_investment, stop_loss_threshold, maker_fee, taker_fee, gain_threshold)
 
     # Get the last non-zero crypto value
     last_crypto_value = get_last_non_zero_crypto(backtest_result)
-    logger.info(f"Last non-zero crypto value: {last_crypto_value:.6f}")
 
     # Display the final portfolio values
     final_strategy_value = backtest_result['strategy_portfolio_value'].iloc[-1]
     final_market_value = backtest_result['market_portfolio_value'].iloc[-1]
-    logger.info(f"Final strategy portfolio value: ${final_strategy_value:.2f}")
-    logger.info(f"Final market portfolio value: ${final_market_value:.2f}")
 
     # Calculate the final gain or loss in percentage
     final_percentage_gain_loss = ((final_strategy_value - initial_investment) / initial_investment) * 100
-    logger.info(f"Final percentage gain/loss: {final_percentage_gain_loss:.2f}%")
 
     # Calculate the number of months in the backtest period
     start_date = datetime.strptime(values.split('|')[0], '%Y-%m-%d')
     end_date = datetime.strptime(values.split('|')[1], '%Y-%m-%d')
     num_months = (end_date.year - start_date.year) * 12 + end_date.month - start_date.month + 1
-    logger.info(f"Number of months in backtest period: {num_months}")
 
     # Calculate the average monthly gain or loss percentage
     avg_monthly_percentage_gain_loss = final_percentage_gain_loss / num_months
-    logger.info(f"Average monthly percentage gain/loss: {avg_monthly_percentage_gain_loss:.2f}%")
 
     # Save results to an Excel file
-    logger.info("Saving results to Excel file")
     backtest_result.to_excel(output_file, index=False)
 
     result_explanation = (
+        f"Backtest results for {pair} with timeframe {timeframe}:\n\n"
         f"Initial crypto amount (with initial investment): {initial_crypto_amount:.6f} {pair.split('USDT')[0]}\n"
         f"Final strategy portfolio value: ${final_strategy_value:.2f}\n"
         f"Final market portfolio value: ${final_market_value:.2f}\n"
