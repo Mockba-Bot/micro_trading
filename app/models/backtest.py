@@ -6,7 +6,7 @@ import os
 import pandas as pd
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 from sklearn.ensemble import RandomForestClassifier
-import pandas_ta as ta
+import numpy as np
 from scipy.stats import randint
 from dotenv import load_dotenv
 import joblib  # Library for model serialization
@@ -148,19 +148,36 @@ def add_indicators(data):
     data['low'] = pd.to_numeric(data['low'])
     data['volume'] = pd.to_numeric(data['volume'])
 
-    # Add technical indicators
-    data['rsi'] = ta.rsi(data['close'])
-    macd = ta.macd(data['close'])
-    data['macd'] = macd.iloc[:, 0]
-    data['macd_signal'] = macd.iloc[:, 1]
-    data['macd_diff'] = macd.iloc[:, 2]
-    bollinger = ta.bbands(data['close'])
-    data['bollinger_hband'] = bollinger.iloc[:, 0]
-    data['bollinger_mavg'] = bollinger.iloc[:, 1]
-    data['bollinger_lband'] = bollinger.iloc[:, 2]
-    data['ema'] = ta.ema(data['close'])
+    # Relative Strength Index (RSI)
+    delta = data['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    data['rsi'] = 100 - (100 / (1 + rs))
+
+    # Moving Average Convergence Divergence (MACD)
+    data['ema_12'] = data['close'].ewm(span=12, adjust=False).mean()
+    data['ema_26'] = data['close'].ewm(span=26, adjust=False).mean()
+    data['macd'] = data['ema_12'] - data['ema_26']
+    data['macd_signal'] = data['macd'].ewm(span=9, adjust=False).mean()
+    data['macd_diff'] = data['macd'] - data['macd_signal']
+
+    # Bollinger Bands
+    data['bollinger_mavg'] = data['close'].rolling(window=20).mean()
+    data['bollinger_std'] = data['close'].rolling(window=20).std()
+    data['bollinger_hband'] = data['bollinger_mavg'] + (data['bollinger_std'] * 2)
+    data['bollinger_lband'] = data['bollinger_mavg'] - (data['bollinger_std'] * 2)
+
+    # Exponential Moving Average (EMA)
+    data['ema'] = data['close'].ewm(span=21, adjust=False).mean()
+
     # Average True Range (ATR) - Volatility indicator
-    data['ATR'] = ta.atr(data['high'], data['low'], data['close'])
+    data['tr'] = pd.concat([
+        data['high'] - data['low'],
+        (data['high'] - data['close'].shift()).abs(),
+        (data['low'] - data['close'].shift()).abs()
+    ], axis=1).max(axis=1)
+    data['ATR'] = data['tr'].rolling(window=14).mean()
 
     return data
 
