@@ -373,6 +373,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
     logger.info(f"Initial crypto amount: {initial_crypto_amount:.6f}")
 
     # Check if a trained model exists and load it, otherwise train a new one
+    logger.info(f"Validate model path exist {os.path.exists(model_path)}")
     if os.path.exists(model_path):
         logger.info("Loading existing model")
         model = joblib.load(model_path)
