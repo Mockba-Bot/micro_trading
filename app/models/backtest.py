@@ -378,12 +378,10 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         model, features = train_model(data, model_path)
 
     # Backtest the strategy with stop-loss, fees, and gain threshold
-    logger.info("Starting backtest strategy")
     backtest_result = await backtest(data, model, features, initial_investment, stop_loss_threshold, maker_fee, taker_fee, gain_threshold)
 
     # Get the last non-zero crypto value
     last_crypto_value = get_last_non_zero_crypto(backtest_result)
-    logger.info(f"Last non-zero crypto value: {last_crypto_value:.6f}")
 
     # Display the final portfolio values
     final_strategy_value = backtest_result['strategy_portfolio_value'].iloc[-1]
