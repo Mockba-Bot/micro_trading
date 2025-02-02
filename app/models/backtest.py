@@ -375,7 +375,9 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
     # Check if a trained model exists and load it, otherwise train a new one
     logger.info(f"Validate model path exist {os.path.exists(model_path)}")
     if os.path.exists(model_path):
-        logger.info("Loading existing model")
+        logger.info(f"Model path exists: {model_path}")
+        logger.info(f"File permissions: {oct(os.stat(model_path).st_mode)}")
+        logger.info(f"Directory contents: {os.listdir(os.path.dirname(model_path))}")
         model = joblib.load(model_path)
         features = ['rsi', 'macd', 'macd_signal', 'macd_diff', 'bollinger_hband', 'bollinger_mavg', 'bollinger_lband', 'ema', 'ATR']
         # Update the model with new data if train_values != initial_training_values
@@ -385,7 +387,8 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             new_data = add_indicators(new_data)
             model = update_model(model, new_data, features)
     else:
-        logger.info("No model found, training new model")
+        logger.info(f"Model path does not exist: {model_path}")
+        logger.info(f"Directory contents: {os.listdir(os.path.dirname(model_path))}")
         model, features = train_model(data, model_path)
 
     # Backtest the strategy with stop-loss, fees, and gain threshold
