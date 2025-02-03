@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 import warnings
 warnings.filterwarnings("ignore")
 # Load environment variables from the .env file
-load_dotenv(dotenv_path=".env.micro.backtest")
+load_dotenv(dotenv_path=".env.micro.trading")
 
 # Access the environment variables
 MODEL_PATH = os.getenv("MODEL_PATH")

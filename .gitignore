@@ -20,4 +20,4 @@ app/alembic/
 
 app/alembic.ini
 docker-compose.yml
-.env.micro.backtest
+.env.micro.trading
