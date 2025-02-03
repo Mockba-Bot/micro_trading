@@ -387,8 +387,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             new_data = add_indicators(new_data)
             model = update_model(model, new_data, features)
     else:
-        logger.info(f"Model path does not exist: {model_path}")
-        logger.info(f"Directory contents: {os.listdir(os.path.dirname(model_path))}")
+        logger.info(f"Model path does not exist: {model_path}, training a new model")
         model, features = train_model(data, model_path)
 
     # Backtest the strategy with stop-loss, fees, and gain threshold
