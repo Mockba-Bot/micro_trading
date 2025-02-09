@@ -1,6 +1,7 @@
 import os
 import logging
 from celery import Celery
+from celery.schedules import crontab
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=".env.micro.central")
@@ -23,6 +24,15 @@ celery_app.conf.update(
     enable_utc=True,
     broker_connection_retry_on_startup=True,
 )
+
+# Configure periodic tasks
+celery_app.conf.beat_schedule = {
+    'run-trader-every-5-minutes': {
+        'task': 'app.tasks.celery_tasks.run_trader',  # Path to the run_trader task
+        'schedule': 600.0,  # Run every 600 seconds (10 minutes)
+        'options': {'queue': 'trading'},  # Ensure it runs in the "trading" queue
+    },
+}
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

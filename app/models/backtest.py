@@ -43,7 +43,6 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 # Set dynamic model path based on pair and timeframe
 def get_model_path(pair, timeframe):
-    logger.info(f"Getting model path for {pair} and {timeframe}, in route {MODEL_PATH}")
     return f'{MODEL_PATH}/trained_model_{pair}_{timeframe}.pkl'
 
 def get_last_non_zero_crypto(data):

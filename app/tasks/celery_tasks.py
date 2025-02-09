@@ -1,7 +1,9 @@
 from app.tasks.celery_app import celery_app
 from app.models.backtest import run_backtest
-import asyncio
+from app.utils.live_trade import trader
 import logging
+import requests
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -25,3 +27,11 @@ def run_backtest_task(pair, timeframe, token, values, stop_loss_threshold=0.05, 
     )
     
     return result
+
+
+@shared_task(queue="trading")
+def run_trader():
+    """
+    Celery task to execute the trader function.
+    """
+    return trader()
