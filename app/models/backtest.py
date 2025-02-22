@@ -4,10 +4,7 @@ import httpx
 import sys
 import os
 import pandas as pd
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
-from sklearn.ensemble import RandomForestClassifier
 import numpy as np
-from scipy.stats import randint
 from dotenv import load_dotenv
 import joblib  # Library for model serialization
 from datetime import datetime
@@ -17,6 +14,8 @@ import requests
 import redis.asyncio as redis
 import json
 import logging
+import boto3
+from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 
 # Add the directory containing your modules to the Python path
 sys.path.append('/app')
@@ -31,19 +30,37 @@ warnings.filterwarnings("ignore")
 load_dotenv(dotenv_path=".env.micro.trading")
 
 # Access the environment variables
-MODEL_PATH = os.getenv("MODEL_PATH")
 FILES_PATH = os.getenv("FILES_PATH")
-CPU_COUNT = os.getenv("CPU_COUNT")
 MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
-cpu_count = os.cpu_count()-int(CPU_COUNT)
+# Configuration for DigitalOcean Spaces
+OBJECT_STORAGE_URL = os.getenv("OBJECT_STORAGE_URL")  # Your DigitalOcean endpoint URL
+ACCESS_KEY = os.getenv("ACCESS_KEY")  # Replace with your DigitalOcean Spaces access key
+SECRET_KEY = os.getenv("SECRET_KEY")  # Replace with your DigitalOcean Spaces secret key
+BUCKET_NAME = 'glogaldv'  # Your bucket name
+
+# Initialize the S3 client with explicit region configuration
+s3_client = boto3.client(
+    's3', 
+    endpoint_url=OBJECT_STORAGE_URL,
+    aws_access_key_id=ACCESS_KEY,
+    aws_secret_access_key=SECRET_KEY,
+    region_name=REGION_NAME  # Ensure region is set
+)
+
+def download_model(bucket_name, key, local_path):
+    """Download a file from DigitalOcean Spaces."""
+    try:
+        s3_client.download_file(bucket_name, key, local_path)
+        print(f"Model downloaded to {local_path}")
+        return True
+    except Exception as e:
+        print(f"Model not found or error downloading: {e}")
+        return False
 
 # Initialize Redis connection
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
-# Set dynamic model path based on pair and timeframe
-def get_model_path(pair, timeframe):
-    return f'{MODEL_PATH}/trained_model_{pair}_{timeframe}.pkl'
 
 def get_last_non_zero_crypto(data):
     non_zero_crypto = data[data['crypto'] > 0]['crypto']
@@ -181,62 +198,6 @@ def add_indicators(data):
 
     return data
 
-# Train the machine learning model with advanced hyperparameter tuning
-def train_model(data, model_path):
-    # Calculate return and target columns
-    data['return'] = data['close'].pct_change().shift(-1)
-    data['target'] = (data['return'] > 0).astype(int)
-    features = ['rsi', 'macd', 'macd_signal', 'macd_diff', 'bollinger_hband', 'bollinger_mavg', 'bollinger_lband', 'ema', 'ATR']
-
-    # Prepare training and testing datasets
-    X = data[features].dropna()
-    y = data['target'].dropna().loc[X.index]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # Define hyperparameter search space
-    param_distributions = {
-        'n_estimators': randint(100, 500),
-        'max_depth': randint(10, 80),
-        'min_samples_split': randint(2, 20),
-        'min_samples_leaf': randint(1, 20),
-        'max_features': ['sqrt', 'log2']
-    }
-    
-    # Perform randomized hyperparameter search
-    randomized_search = RandomizedSearchCV(
-        RandomForestClassifier(random_state=42), 
-        param_distributions, 
-        n_iter=300,  # Increased number of iterations
-        cv=3, 
-        scoring='accuracy', 
-        random_state=42,
-        n_jobs=cpu_count
-    )
-    randomized_search.fit(X_train, y_train)
-    
-    # Get the best model from the search
-    best_model = randomized_search.best_estimator_
-
-    # Save the trained model to disk
-    joblib.dump(best_model, model_path)
-    
-    return best_model, features
-
-# Update the existing model with new data
-def update_model(existing_model, new_data, features):
-    # Calculate return and target columns for the new data
-    new_data['return'] = new_data['close'].pct_change().shift(-1)
-    new_data['target'] = (new_data['return'] > 0).astype(int)
-    
-    # Prepare the new data for training
-    X_new = new_data[features].dropna()
-    y_new = new_data['target'].dropna().loc[X_new.index]
-    
-    # Update the existing model with the new data
-    existing_model.fit(X_new, y_new)
-    
-    return existing_model
-
 # Backtest the strategy with initial investment, stop-loss, and fees
 async def backtest(data, model, features, initial_investment=10000, stop_loss_threshold=0.05, maker_fee=0.001, taker_fee=0.001, gain_threshold=0.001):
     data = data.dropna().copy()
@@ -345,100 +306,83 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
     logger.info("Starting backtest")
 
     # Generate dynamic file names
-    model_path = get_model_path(pair, timeframe)
-    output_file = f'{FILES_PATH}/backtest_results_{pair}_{timeframe}_{token}.xlsx'
-    logger.info(f"Model path: {model_path}")
-    logger.info(f"Output file: {output_file}")
+    MODEL_KEY = f'Mockba/trained_models/trained_model_{pair}_{timeframe}.pkl'
+    local_model_path = f'trained_model_{pair}_{timeframe}.pkl'
+    output_file = f'files/backtest_results_{pair}_{timeframe}_{token}.xlsx'
 
-    # If the model does not exist, train it from January 2023
-    end_date = values.split('|')[1]
-    initial_training_values = f'2023-01-01|{end_date}'
-    train_values = initial_training_values if not os.path.exists(model_path) else values
-    logger.info(f"Training values: {train_values}")
+    if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+        # Fetch historical data and add technical indicators
+        logger.info("Fetching historical data from Binance")
+        await get_all_binance(pair, timeframe, token, save=True)
+        data = await get_historical_data(token, pair, timeframe, train_values)
+        logger.info("Adding technical indicators")
+        data = add_indicators(data)
 
-    # Fetch historical data and add technical indicators
-    logger.info("Fetching historical data from Binance")
-    await get_all_binance(pair, timeframe, token, save=True)
-    data = await get_historical_data(token, pair, timeframe, train_values)
-    logger.info("Adding technical indicators")
-    data = add_indicators(data)
+        # Ensure the return column is calculated and present in the DataFrame
+        data['return'] = data['close'].pct_change().shift(-1)
+        logger.info("Calculated return column")
 
-    # Ensure the return column is calculated and present in the DataFrame
-    data['return'] = data['close'].pct_change().shift(-1)
-    logger.info("Calculated return column")
+        # Calculate initial amount of crypto based on initial investment
+        initial_crypto_amount = initial_investment / data['close'].iloc[0]
+        logger.info(f"Initial crypto amount: {initial_crypto_amount:.6f}")
 
-    # Calculate initial amount of crypto based on initial investment
-    initial_crypto_amount = initial_investment / data['close'].iloc[0]
-    logger.info(f"Initial crypto amount: {initial_crypto_amount:.6f}")
-
-    # Check if a trained model exists and load it, otherwise train a new one
-    logger.info(f"Validate model path exist {os.path.exists(model_path)}")
-    if os.path.exists(model_path):
-        logger.info(f"Model path exists: {model_path}")
-        logger.info(f"File permissions: {oct(os.stat(model_path).st_mode)}")
-        logger.info(f"Directory contents: {os.listdir(os.path.dirname(model_path))}")
-        model = joblib.load(model_path)
+        model = joblib.load(local_model_path)
         features = ['rsi', 'macd', 'macd_signal', 'macd_diff', 'bollinger_hband', 'bollinger_mavg', 'bollinger_lband', 'ema', 'ATR']
-        # Update the model with new data if train_values != initial_training_values
-        if train_values != initial_training_values:
-            logger.info("Updating model with new data")
-            new_data = await get_historical_data(token, pair, timeframe, values)
-            new_data = add_indicators(new_data)
-            model = update_model(model, new_data, features)
+
+        # Backtest the strategy with stop-loss, fees, and gain threshold
+        logger.info("Starting backtest strategy")
+        backtest_result = await backtest(data, model, features, initial_investment, stop_loss_threshold, maker_fee, taker_fee, gain_threshold)
+
+        # Get the last non-zero crypto value
+        last_crypto_value = get_last_non_zero_crypto(backtest_result)
+        logger.info(f"Last non-zero crypto value: {last_crypto_value:.6f}")
+
+        # Display the final portfolio values
+        final_strategy_value = backtest_result['strategy_portfolio_value'].iloc[-1]
+        final_market_value = backtest_result['market_portfolio_value'].iloc[-1]
+        logger.info(f"Final strategy portfolio value: ${final_strategy_value:.2f}")
+        logger.info(f"Final market portfolio value: ${final_market_value:.2f}")
+
+        # Calculate the final gain or loss in percentage
+        final_percentage_gain_loss = ((final_strategy_value - initial_investment) / initial_investment) * 100
+        logger.info(f"Final percentage gain/loss: {final_percentage_gain_loss:.2f}%")
+
+        # Calculate the number of months in the backtest period
+        start_date = datetime.strptime(values.split('|')[0], '%Y-%m-%d')
+        end_date = datetime.strptime(values.split('|')[1], '%Y-%m-%d')
+        num_months = (end_date.year - start_date.year) * 12 + end_date.month - start_date.month + 1
+        logger.info(f"Number of months in backtest period: {num_months}")
+
+        # Calculate the average monthly gain or loss percentage
+        avg_monthly_percentage_gain_loss = final_percentage_gain_loss / num_months
+        logger.info(f"Average monthly percentage gain/loss: {avg_monthly_percentage_gain_loss:.2f}%")
+
+        # Save results to an Excel file
+        logger.info("Saving results to Excel file")
+        backtest_result.to_excel(output_file, index=False)
+
+        result_explanation = (
+            f"Initial crypto amount (with initial investment): {initial_crypto_amount:.6f} {pair.split('USDT')[0]}\n"
+            f"Final strategy portfolio value: ${final_strategy_value:.2f}\n"
+            f"Final market portfolio value: ${final_market_value:.2f}\n"
+            f"Final amount of {pair}: {last_crypto_value:.6f}\n"
+            f"Final percentage gain/loss: {final_percentage_gain_loss:.2f}%\n"
+            f"Average monthly percentage gain/loss: {avg_monthly_percentage_gain_loss:.2f}%\n"
+            f"You have selected a gain threshold of {gain_threshold * 100:.2f}% and a stop-loss threshold of {stop_loss_threshold * 100:.2f}%.\n"
+            f"Execution time: {datetime.now() - start}"
+        )
+        logger.info("Sending result explanation to bot")
+        await send_bot_message(token, result_explanation)
+        # Plot the results and save the plot as PNG
+        logger.info("Plotting backtest results")
+        plot_backtest_results(backtest_result, pair, output_file)
+
+        logger.info("Backtest completed")
+        return result_explanation
     else:
-        logger.info(f"Model path does not exist: {model_path}, training a new model")
-        model, features = train_model(data, model_path)
-
-    # Backtest the strategy with stop-loss, fees, and gain threshold
-    logger.info("Starting backtest strategy")
-    backtest_result = await backtest(data, model, features, initial_investment, stop_loss_threshold, maker_fee, taker_fee, gain_threshold)
-
-    # Get the last non-zero crypto value
-    last_crypto_value = get_last_non_zero_crypto(backtest_result)
-    logger.info(f"Last non-zero crypto value: {last_crypto_value:.6f}")
-
-    # Display the final portfolio values
-    final_strategy_value = backtest_result['strategy_portfolio_value'].iloc[-1]
-    final_market_value = backtest_result['market_portfolio_value'].iloc[-1]
-    logger.info(f"Final strategy portfolio value: ${final_strategy_value:.2f}")
-    logger.info(f"Final market portfolio value: ${final_market_value:.2f}")
-
-    # Calculate the final gain or loss in percentage
-    final_percentage_gain_loss = ((final_strategy_value - initial_investment) / initial_investment) * 100
-    logger.info(f"Final percentage gain/loss: {final_percentage_gain_loss:.2f}%")
-
-    # Calculate the number of months in the backtest period
-    start_date = datetime.strptime(values.split('|')[0], '%Y-%m-%d')
-    end_date = datetime.strptime(values.split('|')[1], '%Y-%m-%d')
-    num_months = (end_date.year - start_date.year) * 12 + end_date.month - start_date.month + 1
-    logger.info(f"Number of months in backtest period: {num_months}")
-
-    # Calculate the average monthly gain or loss percentage
-    avg_monthly_percentage_gain_loss = final_percentage_gain_loss / num_months
-    logger.info(f"Average monthly percentage gain/loss: {avg_monthly_percentage_gain_loss:.2f}%")
-
-    # Save results to an Excel file
-    logger.info("Saving results to Excel file")
-    backtest_result.to_excel(output_file, index=False)
-
-    result_explanation = (
-        f"Initial crypto amount (with initial investment): {initial_crypto_amount:.6f} {pair.split('USDT')[0]}\n"
-        f"Final strategy portfolio value: ${final_strategy_value:.2f}\n"
-        f"Final market portfolio value: ${final_market_value:.2f}\n"
-        f"Final amount of {pair}: {last_crypto_value:.6f}\n"
-        f"Final percentage gain/loss: {final_percentage_gain_loss:.2f}%\n"
-        f"Average monthly percentage gain/loss: {avg_monthly_percentage_gain_loss:.2f}%\n"
-        f"You have selected a gain threshold of {gain_threshold * 100:.2f}% and a stop-loss threshold of {stop_loss_threshold * 100:.2f}%.\n"
-        f"Execution time: {datetime.now() - start}"
-    )
-    logger.info("Sending result explanation to bot")
-    await send_bot_message(token, result_explanation)
-    # Plot the results and save the plot as PNG
-    logger.info("Plotting backtest results")
-    plot_backtest_results(backtest_result, pair, output_file)
-
-    logger.info("Backtest completed")
-    return result_explanation
+        logger.info("No model found it must bbe trained")
+        await send_bot_message(token, "No model found. Please train a model first.")
+        return   
 
 
 # Example of how to call run_backtest
