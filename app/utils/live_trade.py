@@ -20,7 +20,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
 API_TOKEN = os.getenv("API_TOKEN")
 bot = telebot.TeleBot(API_TOKEN)
 
-from log_config import trader_logger, gainers_logger  # Import the two loggers
+from app.logs.log_config import trader_logger, gainers_logger  # Import the two loggers
 
 # Load environment variables from the .env file
 load_dotenv(dotenv_path=".env.micro.trading")

@@ -23,5 +23,5 @@ app.include_router(status_router, prefix="/api/v1/trading")
 # uvicorn app.main:app --port 8001 --reload 
 # redis-cli flushdb
 # redis-cli flushall
-# celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=8 --queues=trading
+# celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=2 --queues=trading
 # celery -A app.tasks.celery_app.celery_app beat --loglevel=info

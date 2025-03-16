@@ -3,10 +3,8 @@ from pydantic import BaseModel
 from celery.result import AsyncResult
 from app.tasks.celery_app import celery_app
 from app.tasks.celery_tasks import run_backtest_task
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 from fastapi.responses import JSONResponse
+from typing import List, Optional
 
 class BacktestRequest(BaseModel):
     pair: str
@@ -18,14 +16,15 @@ class BacktestRequest(BaseModel):
     maker_fee: float = 0.001
     taker_fee: float = 0.001
     gain_threshold: float = 0.001
-
-limiter = Limiter(key_func=get_remote_address)
+    leverage: int = 1
+    features: Optional[List[str]] = None,
+    withdraw_percentage: float = 0.7,
+    compound_percentage: float = 0.3
 
 backtest_router = APIRouter()
 status_router = APIRouter()
 
 @backtest_router.post("/backtest")
-@limiter.limit("10/second")
 async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
     """
     Run the backtest with the provided parameters.
@@ -40,7 +39,11 @@ async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
             backtest_request.initial_investment,
             backtest_request.maker_fee,
             backtest_request.taker_fee,
-            backtest_request.gain_threshold
+            backtest_request.gain_threshold,
+            backtest_request.leverage,
+            backtest_request.features,
+            backtest_request.withdraw_percentage,
+            backtest_request.compound_percentage
         )
         return {"task_id": task.id}
     except Exception as e:
@@ -57,11 +60,3 @@ async def get_task_status(task_id: str):
         return {"status": "Failure", "result": str(task_result.result)}
     else:
         return {"status": task_result.state}
-
-# Add exception handler for rate limit exceeded
-@backtest_router.exception_handler(RateLimitExceeded)
-async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
-    return JSONResponse(
-        status_code=429,
-        content={"detail": "Rate limit exceeded. Please try again later."}
-    )
