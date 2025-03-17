@@ -30,6 +30,10 @@ load_dotenv(dotenv_path=".env.micro.trading")
 BUCKET_NAME = os.getenv("BUCKET_NAME")  # Your bucket name
 MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")  # Your micro central URL
 
+# Orderly Mockba fees
+MAKER_FEE = 0.001
+TAKER_FEE = 0.001
+
 # Initialize Redis connection
 try:
     redis_client = redis.from_url(os.getenv("REDIS_URL"))
@@ -361,10 +365,9 @@ def get_strategy_name(timeframe, features):
     return None
 
 
-# Backtest the strategy with initial investment, stop-loss, fees, and leverage
 async def backtest(data, model, features, initial_investment=100, stop_loss_threshold=0.02, 
-                   maker_fee=0.001, taker_fee=0.001, gain_threshold=0.005, leverage=5, 
-                   funding_rate=0.0001, withdraw_percentage=0.7, compound_percentage=0.3, 
+                   gain_threshold=0.005, leverage=5, 
+                   withdraw_percentage=0.7, compound_percentage=0.3, 
                    num_trades=None, asset="PERP_APT_USDC", timeframe="1h"):
     """
     Backtests a perpetual futures trading strategy using a trained model.
@@ -409,6 +412,11 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
     data['liquidation'] = 0
     data['profit_withdrawn'] = 0.0  # Track withdrawn profits
     data['compounded_profit'] = 0.0  # Track compounded reinvestment
+    data['stop_loss_triggered'] = False  # Track stop loss triggers
+    data['take_profit_triggered'] = False  # Track take-profit triggers
+    data['stop_loss_amount'] = 0.0 # initial_investment * (1 - stop_loss_threshold)  # Track stop loss amount
+    data['trading_fees'] = 0.0  # Track trading fees
+
     total_liquidation_amount = 0  
     position_open = False
     last_position_price = 0
@@ -490,10 +498,16 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
         # --- Trade Execution Logic ---
         if data['predicted'].iloc[i - 1] == 1:  # Long signal
             if not position_open:
-                position_size = (leveraged_investment / data['close'].iloc[i]) * (1 - maker_fee * leverage)
+                # Calculate position size and trading fees
+                position_size = (leveraged_investment / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
+                trading_fee = position_size * data['close'].iloc[i] * MAKER_FEE  # Trading fee for opening the position
+                
+                # Update position and fee columns
                 data['position'].iloc[i] = 1
                 data['position_size'].iloc[i] = position_size
                 data['margin_used'].iloc[i] = leveraged_investment / leverage
+                data['trading_fees'].iloc[i] = trading_fee  # Store the trading fee
+                
                 position_open = True
                 last_position_price = data['close'].iloc[i]
                 trade_count += 1  # Increment trade count
@@ -501,13 +515,20 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
                 data['position'].iloc[i] = data['position'].iloc[i - 1]
                 data['position_size'].iloc[i] = data['position_size'].iloc[i - 1]
                 data['margin_used'].iloc[i] = data['margin_used'].iloc[i - 1]
+                data['trading_fees'].iloc[i] = 0  # No new fee for holding the position
 
         elif data['predicted'].iloc[i - 1] == -1:  # Short signal
             if not position_open:
-                position_size = (leveraged_investment / data['close'].iloc[i]) * (1 - maker_fee * leverage)
+                # Calculate position size and trading fees
+                position_size = (leveraged_investment / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
+                trading_fee = position_size * data['close'].iloc[i] * MAKER_FEE  # Trading fee for opening the position
+                
+                # Update position and fee columns
                 data['position'].iloc[i] = -1
                 data['position_size'].iloc[i] = position_size
                 data['margin_used'].iloc[i] = leveraged_investment / leverage
+                data['trading_fees'].iloc[i] = trading_fee  # Store the trading fee
+                
                 position_open = True
                 last_position_price = data['close'].iloc[i]
                 trade_count += 1  # Increment trade count
@@ -515,12 +536,13 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
                 data['position'].iloc[i] = data['position'].iloc[i - 1]
                 data['position_size'].iloc[i] = data['position_size'].iloc[i - 1]
                 data['margin_used'].iloc[i] = data['margin_used'].iloc[i - 1]
+                data['trading_fees'].iloc[i] = 0  # No new fee for holding the position
 
         elif data['predicted'].iloc[i - 1] == 0 and position_open:  # Close position
             pnl = (data['close'].iloc[i] - last_position_price) * data['position_size'].iloc[i - 1] if data['position'].iloc[i - 1] == 1 else \
                   (last_position_price - data['close'].iloc[i]) * data['position_size'].iloc[i - 1]
 
-            realized_profit = pnl * (1 - taker_fee * leverage)
+            realized_profit = pnl * (1 - TAKER_FEE * leverage)
             withdrawn_profit = realized_profit * withdraw_percentage
             compounded_profit = realized_profit * compound_percentage
 
@@ -555,9 +577,61 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
             current_portfolio_value = data['strategy_portfolio_value'].iloc[i]
             trailing_stop_loss = max(trailing_stop_loss, current_portfolio_value * (1 - stop_loss_threshold))
 
-            if current_portfolio_value <= trailing_stop_loss or current_portfolio_value >= initial_investment * (1 + gain_threshold):
+            # Check if stop loss or take-profit is triggered
+            if current_portfolio_value <= trailing_stop_loss:
+                # Calculate the actual monetary loss
+                monetary_loss = current_portfolio_value - trailing_stop_loss
+                # Update the stop loss amount in the DataFrame with the monetary loss
+                data['stop_loss_amount'].iloc[i] = abs(monetary_loss)  # Use absolute value for clarity
+                data['stop_loss_triggered'].iloc[i] = True
+                data['predicted'].iloc[i] = 0  # Force position to close
+            else:
+                # When stop loss is not triggered, set stop_loss_amount to zero
+                data['stop_loss_amount'].iloc[i] = 0
+                data['stop_loss_triggered'].iloc[i] = False  # Ensure stop_loss_triggered is False
+
+            # Take-profit logic remains unchanged
+            if current_portfolio_value >= initial_investment * (1 + gain_threshold):
+                data['take_profit_triggered'].iloc[i] = True
                 data['predicted'].iloc[i] = 0  # Force position to close
 
+        # --- Liquidation Check ---
+        if position_open:
+            # Calculate notional value
+            notional = data['position_size'].iloc[i] * data['close'].iloc[i]
+
+            # Calculate Account Margin Ratio (AMR)
+            total_collateral_value = data['cash'].iloc[i] + pnl
+            account_margin_ratio = total_collateral_value / abs(notional)
+
+            # Calculate Maintenance Margin Ratio (MMR)
+            _, mmr = get_margin_ratios(notional)
+
+            # Check if liquidation is triggered
+            if account_margin_ratio < mmr:
+                # Determine liquidation type (Low Tier or High Tier)
+                liquidation_fee, liquidator_fee = get_liquidation_fees(asset, leverage)
+                user_liquidation_fee = liquidation_fee * abs(notional)
+                liquidator_fee_total = liquidator_fee * abs(notional)
+
+                # Apply liquidation
+                data['liquidation'].iloc[i] = 1
+                total_liquidation_amount += data['strategy_portfolio_value'].iloc[i - 1] - liquidation_threshold
+                data['cash'].iloc[i] = data['strategy_portfolio_value'].iloc[i - 1] - liquidation_threshold - user_liquidation_fee - liquidator_fee_total
+                data['position'].iloc[i] = 0
+                data['position_size'].iloc[i] = 0
+                data['margin_used'].iloc[i] = 0
+                position_open = False
+
+    # Take-profit logic remains unchanged
+    if current_portfolio_value >= initial_investment * (1 + gain_threshold):
+        data['take_profit_triggered'].iloc[i] = True
+        data['predicted'].iloc[i] = 0  # Force position to close
+
+    # Take-profit logic remains unchanged
+    if current_portfolio_value >= initial_investment * (1 + gain_threshold):
+        data['take_profit_triggered'].iloc[i] = True
+        data['predicted'].iloc[i] = 0  # Force position to close
         # --- Liquidation Check ---
         if position_open:
             # Calculate notional value
@@ -590,6 +664,7 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
                 position_open = False
 
     return data, total_liquidation_amount
+
 
 # Plot data
 def plot_backtest_results(data, pair, output_file):
@@ -666,10 +741,9 @@ def plot_backtest_results(data, pair, output_file):
 
 # Updated run_backtest function with logging
 async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05, 
-                       initial_investment=10000, maker_fee=0.001, taker_fee=0.001, 
-                       gain_threshold=0.001, leverage=1, features=None, funding_rate=0.0001, 
-                       withdraw_percentage=0.7, compound_percentage=0.3):
-
+                       initial_investment=10000, gain_threshold=0.001
+                       , leverage=1, features=None
+                       , withdraw_percentage=0.7, compound_percentage=0.3, num_trades=None):
     start = datetime.now()
     logger.info("Starting backtest")
 
@@ -705,45 +779,45 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         data['return'] = data['close'].pct_change().shift(-1)
         logger.info("Calculated return column")
 
-        # print(f"✅ Model downloaded from {BUCKET_NAME}/{MODEL_KEY}")
+        # Load the model
         model_metadata = joblib.load(local_model_path)
         model = model_metadata["model"]
         used_features = model_metadata.get("used_features", [])
-        # print(f"✅ Model loaded with features: {used_features}")
 
-        # 🛠 Add missing features to the dataset
+        # Add missing features to the dataset
         missing_features = [f for f in used_features if f not in data.columns]
         if missing_features:
-            # logger.warning(f"⚠️ Warning: The following trained features are missing in dataset: {missing_features}")
-            # Add missing features to the dataset
             data = add_indicators(data, missing_features)
-            # logger.info(f"✅ Added missing features: {missing_features}")
 
         # Ensure dataset contains only trained features and in correct order
         data = data[used_features]
-        # print(f"✅ Final Features for Backtest: {used_features}")
 
         # Calculate market portfolio value (buy-and-hold strategy)
         if 'return' in data.columns:
             data['market_portfolio_value'] = initial_investment * (1 + data['return'].cumsum())
         else:
-            # logger.warning("⚠️ 'return' column is missing. Skipping market portfolio value calculation.")
             data['market_portfolio_value'] = initial_investment  # Default to initial investment
-
 
         # Proceed with backtest using `final_features`
         backtest_result, total_liquidation_amount = await backtest(
-            data, model, used_features, 
-            initial_investment, stop_loss_threshold, 
-            maker_fee, taker_fee, gain_threshold, leverage, 
-            funding_rate, withdraw_percentage, compound_percentage, 10, pair, timeframe
+            data
+            , model
+            , used_features
+            , initial_investment
+            , stop_loss_threshold
+            , gain_threshold
+            , leverage
+            , withdraw_percentage
+            , compound_percentage
+            , num_trades
+            , pair
+            , timeframe
         )
 
         # Calculate key metrics
-        # final_strategy_value = backtest_result['strategy_portfolio_value'].iloc[-1]
-        # final_market_value = backtest_result['market_portfolio_value'].iloc[-1]
         total_funding_payments = backtest_result['funding_payments'].sum()
         total_compounded_profit = backtest_result['compounded_profit'].sum()
+        total_trading_fees = backtest_result['trading_fees'].sum()
         total_strategy_value = initial_investment + total_compounded_profit
         final_percentage_gain_loss = ((total_strategy_value - initial_investment) / initial_investment) * 100
 
@@ -756,30 +830,37 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             f"**Final percentage gain/loss:** {final_percentage_gain_loss:.2f}% 💹\n"
             f"**Total strategy value (capital + compounded):** ${total_strategy_value:.2f}\n"
             f"**Profit withdrawn:** ${backtest_result['profit_withdrawn'].sum():.2f}  🚀\n"
-            f"**Profit withdrawn percentage:*** {withdraw_percentage * 100:.2f}%\n"
+            f"**Profit withdrawn percentage:** {withdraw_percentage * 100:.2f}%\n"
             f"**Compounded profit:** ${total_compounded_profit:.2f}  🚀\n"
-            f"**Compounded profit percentage:*** {compound_percentage * 100:.2f}%\n"
+            f"**Compounded profit percentage:** {compound_percentage * 100:.2f}%\n"
             f"**Total funding payments:** ${total_funding_payments:.2f}\n"
             f"**Total liquidation amount:** ${total_liquidation_amount:.2f}\n"
+            f"**Total trading fees:** ${total_trading_fees:.2f}\n"
             f"**Gain threshold:** {gain_threshold * 100:.2f}%\n"
             f"**Stop-loss threshold:** {stop_loss_threshold * 100:.2f}%\n"
             f"**Leverage used:** {leverage}x\n"
             f"**Number of trades executed:** {backtest_result['position'].abs().sum()}\n"  # Count number of trades
-            f"**Strategy name:** {get_strategy_name(timeframe,features)}\n"
+            f"**Strategy name:** {get_strategy_name(timeframe, features)}\n"
             f"**Used Features:** {used_features}\n\n"
             f"**Execution time:** {datetime.now() - start}"
         )
-        # logger.info(result_explanation)
-        await send_bot_message(token, result_explanation)
+        logger.info(result_explanation)
+        # await send_bot_message(token, result_explanation)
 
         # Save results to an Excel file with only relevant columns
         logger.info("Saving results to Excel file")
         relevant_columns = [
             'start_timestamp', 'close', 'position', 'position_size', 'margin_used',
             'funding_payments', 'strategy_portfolio_value', 'liquidation',
-            'profit_withdrawn', 'compounded_profit'
+            'profit_withdrawn', 'compounded_profit', 'notional_value', 'stop_loss_triggered', 'take_profit_triggered'
+            , 'stop_loss_amount'
         ]
-        
+
+        # Add new columns for open/close position, taker/maker fees, and liquidation price
+        backtest_result['open_close_position'] = backtest_result['position'].apply(
+            lambda x: 'open' if x != 0 else 'close'
+        )
+
         # Map position values to descriptive strings
         position_map = {
             1: 'long',
@@ -787,15 +868,34 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             0: 'hold'
         }
         backtest_result['position'] = backtest_result['position'].map(position_map)
+
         
-        # Round "close" to 6 decimals
-        backtest_result["close"] = backtest_result["close"].round(6)
+        # Define the exact column order you want
+        final_columns = [
+            "start_timestamp",
+            "close",
+            "position",
+            "open_close_position",
+            "position_size",
+            "margin_used",
+            "funding_payments",
+            "strategy_portfolio_value",
+            "liquidation",
+            "profit_withdrawn",
+            "compounded_profit",
+            "leveraged_taker_fee",
+            "leveraged_maker_fee",
+            "liquidation_price",
+            "liquidation_amount",
+            "notional_value", 
+            "stop_loss_triggered",
+            "take_profit_triggered",
+            "stop_loss_amount"
+        ]
 
-        # Round other relevant numeric columns to 2 decimals
-        columns_to_round_2 = [col for col in relevant_columns if col != "close"]
-        backtest_result[columns_to_round_2] = backtest_result[columns_to_round_2].round(2)
-
-        backtest_result[relevant_columns].to_excel(output_file, index=False)
+        # Save to Excel with the specified column order
+        # backtest_result[final_columns].to_excel(output_file, index=False)
+        backtest_result.to_excel(output_file, index=False)
 
         # Plot the results and save the plot as PNG
         logger.info("Plotting backtest results")
@@ -812,7 +912,6 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
     else:
         logger.info(f"No model found for {pair}_{timeframe} it must be trained, contact support")
         await send_bot_message(token, "No model found it must be trained, contact support.")
-
 
 # Example of how to call run_backtest
 # if __name__ == "__main__":

@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 @shared_task(queue="trading")
 def run_backtest_task(pair, timeframe, token, values, stop_loss_threshold=0.05, initial_investment=10000
     , maker_fee=0.001, taker_fee=0.001, gain_threshold=0.001, leverage=1
-    , features=None, withdraw_percentage=0.7, compound_percentage=0.3):
+    , features=None, withdraw_percentage=0.7, compound_percentage=0.3, num_trades=None):
     logger.info(f"Running backtest for {pair} with timeframe {timeframe}")
     
     # ✅ Fix: Use `asyncio.get_event_loop()` instead of `asyncio.run()`
@@ -29,13 +29,12 @@ def run_backtest_task(pair, timeframe, token, values, stop_loss_threshold=0.05, 
             values, 
             stop_loss_threshold, 
             initial_investment, 
-            maker_fee, 
-            taker_fee, 
             gain_threshold,
             leverage,
             features,
             withdraw_percentage,
-            compound_percentage
+            compound_percentage,
+            num_trades
         )
     )
     
