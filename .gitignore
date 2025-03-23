@@ -21,3 +21,9 @@ app/alembic/
 app/alembic.ini
 docker-compose.yml
 .env.micro.trading
+
+# Ignore the "files" folder
+files/
+.vscode/settings.json
+
+logs/

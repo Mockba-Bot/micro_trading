@@ -1,18 +1,26 @@
 import asyncio
 from celery import shared_task
-from app.tasks.celery_app import celery_app
 from app.models.backtest import run_backtest
 from app.utils.live_trade import trader
 import logging
-import requests
-import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 @shared_task(queue="trading")
-def run_backtest_task(pair, timeframe, token, values, stop_loss_threshold=0.05, initial_investment=10000
-    , maker_fee=0.001, taker_fee=0.001, gain_threshold=0.001, leverage=1
-    , features=None, withdraw_percentage=0.7, compound_percentage=0.3, num_trades=None):
+def run_backtest_task(
+      pair
+    , timeframe
+    , token
+    , values
+    , stop_loss_threshold=0.05
+    , initial_investment=10000
+    , gain_threshold=0.001
+    , leverage=1
+    , features=None
+    , withdraw_percentage=0.7
+    , compound_percentage=0.3
+    , num_trades=None):
+    
     logger.info(f"Running backtest for {pair} with timeframe {timeframe}")
     
     # ✅ Fix: Use `asyncio.get_event_loop()` instead of `asyncio.run()`

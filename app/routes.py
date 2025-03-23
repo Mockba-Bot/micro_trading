@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from celery.result import AsyncResult
 from app.tasks.celery_app import celery_app
 from app.tasks.celery_tasks import run_backtest_task
-from fastapi.responses import JSONResponse
 from typing import List, Optional
 
 class BacktestRequest(BaseModel):
@@ -19,7 +18,8 @@ class BacktestRequest(BaseModel):
     leverage: int = 1
     features: Optional[List[str]] = None,
     withdraw_percentage: float = 0.7,
-    compound_percentage: float = 0.3
+    compound_percentage: float = 0.3,
+    num_trades: Optional[int] = None
 
 backtest_router = APIRouter()
 status_router = APIRouter()
@@ -37,13 +37,12 @@ async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
             backtest_request.values,
             backtest_request.stop_loss_threshold,
             backtest_request.initial_investment,
-            backtest_request.maker_fee,
-            backtest_request.taker_fee,
             backtest_request.gain_threshold,
             backtest_request.leverage,
             backtest_request.features,
             backtest_request.withdraw_percentage,
-            backtest_request.compound_percentage
+            backtest_request.compound_percentage,
+            backtest_request.num_trades
         )
         return {"task_id": task.id}
     except Exception as e:

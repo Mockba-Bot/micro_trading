@@ -1,6 +1,5 @@
-import asyncio
 import aiohttp
-import httpx
+import time
 import sys
 import os
 import pandas as pd
@@ -14,6 +13,7 @@ import requests
 import redis.asyncio as redis
 import logging
 from app.models.bucket import download_model
+from deep_translator import GoogleTranslator
 
 # Add the directory containing your modules to the Python path
 sys.path.append('/app')
@@ -31,8 +31,20 @@ BUCKET_NAME = os.getenv("BUCKET_NAME")  # Your bucket name
 MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")  # Your micro central URL
 
 # Orderly Mockba fees
-MAKER_FEE = 0.001
-TAKER_FEE = 0.001
+MAKER_FEE = 0.0003 # 0.03%
+TAKER_FEE = 0.0006 # 0.06%
+
+def translate(text, token):
+    """Translate text to the target language using GoogleTranslator."""
+    response = requests.get(f"{MICRO_CENTRAL_URL}/tlogin/{token}")
+    if response.status_code == 200:
+        user_data = response.json()
+        target_lang = user_data.get('language', 'en')
+        if target_lang == 'en':
+            return text
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    return text  # Return original text if translation fails
+
 
 # Initialize Redis connection
 try:
@@ -67,7 +79,7 @@ async def send_bot_message(token, message):
                 response.raise_for_status()
 
 # Fetch historical data from the database
-async def get_historical_data(token, pair, timeframe, values):
+async def get_historical_data(token, pair, timeframe, values, max_retries=3, retry_delay=5):
     cache_key = f"historical_data:{pair}:{timeframe}:{values}:{token}"
     
     # Check if the data exists in Redis
@@ -86,25 +98,36 @@ async def get_historical_data(token, pair, timeframe, values):
     headers = {
         "Token": token
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as response:
-            if response.status == 200:
-                data = await response.json()
-                df = pd.DataFrame(data)
-                
-                # Convert columns to numeric types
-                df['close'] = pd.to_numeric(df['close'])
-                df['high'] = pd.to_numeric(df['high'])
-                df['low'] = pd.to_numeric(df['low'])
-                df['volume'] = pd.to_numeric(df['volume'])
-                
-                # Store the data in Redis for 1 hour (3600 seconds)
-                await redis_client.setex(cache_key, 3600, df.to_json())
-                
-                return df
+
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        df = pd.DataFrame(data)
+                        
+                        # Convert columns to numeric types
+                        df['close'] = pd.to_numeric(df['close'])
+                        df['high'] = pd.to_numeric(df['high'])
+                        df['low'] = pd.to_numeric(df['low'])
+                        df['volume'] = pd.to_numeric(df['volume'])
+                        
+                        # Store the data in Redis for 1 hour (3600 seconds)
+                        await redis_client.setex(cache_key, 3600, df.to_json())
+                        
+                        return df
+                    else:
+                        logger.error(f"Error fetching historical data: {response.status} {await response.text()}")
+                        response.raise_for_status()
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
             else:
-                logger.error(f"Error fetching historical data: {response.status} {await response.text()}")
-                response.raise_for_status()
+                raise e
+
 
 # Add technical indicators to the data
 def add_indicators(data, required_features):
@@ -365,10 +388,20 @@ def get_strategy_name(timeframe, features):
     return None
 
 
-async def backtest(data, model, features, initial_investment=100, stop_loss_threshold=0.02, 
-                   gain_threshold=0.005, leverage=5, 
-                   withdraw_percentage=0.7, compound_percentage=0.3, 
-                   num_trades=None, asset="PERP_APT_USDC", timeframe="1h"):
+async def backtest(
+    data,
+    model,
+    features,
+    initial_investment=100,
+    stop_loss_threshold=0.02,
+    gain_threshold=0.005,
+    leverage=5,
+    withdraw_percentage=0.7,
+    compound_percentage=0.3,
+    num_trades=None,
+    asset="PERP_APT_USDC",
+    timeframe="1h",
+):
     """
     Backtests a perpetual futures trading strategy using a trained model.
     """
@@ -412,10 +445,12 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
     data['liquidation'] = 0
     data['profit_withdrawn'] = 0.0  # Track withdrawn profits
     data['compounded_profit'] = 0.0  # Track compounded reinvestment
-    data['stop_loss_triggered'] = False  # Track stop loss triggers
-    data['take_profit_triggered'] = False  # Track take-profit triggers
-    data['stop_loss_amount'] = 0.0 # initial_investment * (1 - stop_loss_threshold)  # Track stop loss amount
+    data['stop_loss_amount'] = 0.0  # Track stop loss amount
     data['trading_fees'] = 0.0  # Track trading fees
+    data['taker_fee_amount'] = 0.0  # Track taker fees
+    data['liquidation_price'] = 0.0  # Track liquidation price
+    data['liquidation_amount'] = 0.0  # Track liquidation amount
+    data['realized_profit'] = 0.0  # Track realized profit
 
     total_liquidation_amount = 0  
     position_open = False
@@ -423,9 +458,6 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
     last_funding_time = 0  
     trade_count = 0  # Track the number of trades
     trailing_stop_loss = initial_investment * (1 - stop_loss_threshold)  # Initialize trailing stop loss
-
-    # Adjust initial investment based on leverage
-    leveraged_investment = initial_investment * leverage
 
     # --- 2️⃣ Get Fees and Rates ---
     funding_rate_map = {
@@ -454,7 +486,7 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
             liquidator_fee (float): Fee paid to the liquidator.
         """
         # High Tier Liquidation Fees
-        if asset.split("|")[1] in ["BTC", "ETH"]:
+        if asset.split("_")[1] in ["BTC", "ETH"]:
             user_liquidation_fee = 0.008  # 0.80%
             liquidator_fee = 0.004  # 0.40%
         else:
@@ -498,71 +530,102 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
         # --- Trade Execution Logic ---
         if data['predicted'].iloc[i - 1] == 1:  # Long signal
             if not position_open:
-                # Calculate position size and trading fees
-                position_size = (leveraged_investment / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
-                trading_fee = position_size * data['close'].iloc[i] * MAKER_FEE  # Trading fee for opening the position
+                # Calculate position size and trading fees (maker fee for opening)
+                position_size = (data['cash'].iloc[i - 1] * leverage / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
+                trading_fee = position_size * data['close'].iloc[i] * MAKER_FEE  # Maker fee for opening the position
                 
                 # Update position and fee columns
                 data['position'].iloc[i] = 1
                 data['position_size'].iloc[i] = position_size
-                data['margin_used'].iloc[i] = leveraged_investment / leverage
+                data['margin_used'].iloc[i] = data['cash'].iloc[i - 1]  # Use current cash balance for margin
                 data['trading_fees'].iloc[i] = trading_fee  # Store the trading fee
+                
+                # Update cash balance (subtract trading fee)
+                data['cash'].iloc[i] = data['cash'].iloc[i - 1] - trading_fee
                 
                 position_open = True
                 last_position_price = data['close'].iloc[i]
                 trade_count += 1  # Increment trade count
             else:
+                # If position is already open, carry forward the previous values
                 data['position'].iloc[i] = data['position'].iloc[i - 1]
                 data['position_size'].iloc[i] = data['position_size'].iloc[i - 1]
                 data['margin_used'].iloc[i] = data['margin_used'].iloc[i - 1]
                 data['trading_fees'].iloc[i] = 0  # No new fee for holding the position
+                data['cash'].iloc[i] = data['cash'].iloc[i - 1]  # Carry forward cash balance
 
         elif data['predicted'].iloc[i - 1] == -1:  # Short signal
             if not position_open:
-                # Calculate position size and trading fees
-                position_size = (leveraged_investment / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
-                trading_fee = position_size * data['close'].iloc[i] * MAKER_FEE  # Trading fee for opening the position
+                # Calculate position size and trading fees (maker fee for opening)
+                position_size = (data['cash'].iloc[i - 1] * leverage / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
+                trading_fee = position_size * data['close'].iloc[i] * MAKER_FEE  # Maker fee for opening the position
                 
                 # Update position and fee columns
                 data['position'].iloc[i] = -1
                 data['position_size'].iloc[i] = position_size
-                data['margin_used'].iloc[i] = leveraged_investment / leverage
+                data['margin_used'].iloc[i] = data['cash'].iloc[i - 1]  # Use current cash balance for margin
                 data['trading_fees'].iloc[i] = trading_fee  # Store the trading fee
+                
+                # Update cash balance (subtract trading fee)
+                data['cash'].iloc[i] = data['cash'].iloc[i - 1] - trading_fee
                 
                 position_open = True
                 last_position_price = data['close'].iloc[i]
                 trade_count += 1  # Increment trade count
             else:
+                # If position is already open, carry forward the previous values
                 data['position'].iloc[i] = data['position'].iloc[i - 1]
                 data['position_size'].iloc[i] = data['position_size'].iloc[i - 1]
                 data['margin_used'].iloc[i] = data['margin_used'].iloc[i - 1]
                 data['trading_fees'].iloc[i] = 0  # No new fee for holding the position
+                data['cash'].iloc[i] = data['cash'].iloc[i - 1]  # Carry forward cash balance
 
         elif data['predicted'].iloc[i - 1] == 0 and position_open:  # Close position
-            pnl = (data['close'].iloc[i] - last_position_price) * data['position_size'].iloc[i - 1] if data['position'].iloc[i - 1] == 1 else \
-                  (last_position_price - data['close'].iloc[i]) * data['position_size'].iloc[i - 1]
+                # 1) Compute PnL
+                pnl = (data['close'].iloc[i] - last_position_price) * data['position_size'].iloc[i - 1] \
+                    if data['position'].iloc[i - 1] == 1 \
+                    else (last_position_price - data['close'].iloc[i]) * data['position_size'].iloc[i - 1]
 
-            realized_profit = pnl * (1 - TAKER_FEE * leverage)
-            withdrawn_profit = realized_profit * withdraw_percentage
-            compounded_profit = realized_profit * compound_percentage
+                # 2) Calculate taker fee for closing the position
+                taker_fee = abs(pnl) * TAKER_FEE * leverage
+                data['taker_fee_amount'].iloc[i] = taker_fee  # Store the taker fee amount
 
-            # Reinvest the compounded profit
-            data['cash'].iloc[i] = data['cash'].iloc[i - 1] + realized_profit - withdrawn_profit + compounded_profit
-            # Execute profit withdrawal only if withdrawn_profit is greater than zero
-            if withdrawn_profit > 0:
-                data['profit_withdrawn'].iloc[i] = withdrawn_profit
-            else:
-                data['profit_withdrawn'].iloc[i] = 0  # Set to zero if no profit is withdrawn
-            # Execute profit reinvestment only if compounded_profit is greater than zero
-            if compounded_profit > 0:
-                data['compounded_profit'].iloc[i] = compounded_profit
-            else:
-                data['compounded_profit'].iloc[i] = 0  # Set to zero if no profit is reinvested    
-            data['position'].iloc[i] = 0
-            data['position_size'].iloc[i] = 0
-            data['margin_used'].iloc[i] = 0
-            position_open = False
-            trade_count += 1  # Increment trade count
+                # 3) Apply taker fee to realized profit (this can be negative if pnl < 0)
+                realized_profit = pnl * (1 - TAKER_FEE * leverage)
+                data['realized_profit'].iloc[i] = realized_profit
+
+                # ───────────────────────────────────────────────────────────────────
+                # 4) Subtract/Add the realized PnL from cash — whether negative or positive
+                # ───────────────────────────────────────────────────────────────────
+                data['cash'].iloc[i] = data['cash'].iloc[i - 1] + realized_profit
+
+                # ───────────────────────────────────────────────────────────────────
+                # 5) If realized PnL is positive, then split between withdrawal & compounding
+                #    Otherwise, no withdrawal or compounding occurs on a losing trade.
+                # ───────────────────────────────────────────────────────────────────
+                if realized_profit > 0:
+                    withdrawn_profit = realized_profit * withdraw_percentage if withdraw_percentage > 0 else 0
+                    compounded_profit = realized_profit * compound_percentage if compound_percentage > 0 else 0
+
+                    # Update cash with the net effect of compounding minus withdrawals
+                    data['cash'].iloc[i] += (compounded_profit - withdrawn_profit)
+
+                    data['profit_withdrawn'].iloc[i] = withdrawn_profit
+                    data['compounded_profit'].iloc[i] = compounded_profit
+                else:
+                    data['profit_withdrawn'].iloc[i] = 0.0
+                    data['compounded_profit'].iloc[i] = 0.0
+
+                # 6) Close the position
+                data['position'].iloc[i] = 0
+                data['position_size'].iloc[i] = 0
+                data['margin_used'].iloc[i] = 0
+                position_open = False
+                trade_count += 1  # Increment trade count
+
+        else:
+            # If no trade is executed, carry forward the previous cash balance
+            data['cash'].iloc[i] = data['cash'].iloc[i - 1]    
 
         # --- Portfolio Value Calculation ---
         if position_open:
@@ -575,63 +638,24 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
         # --- Stop-Loss & Take-Profit ---
         if position_open:
             current_portfolio_value = data['strategy_portfolio_value'].iloc[i]
+
+            # Update your trailing stop logic
             trailing_stop_loss = max(trailing_stop_loss, current_portfolio_value * (1 - stop_loss_threshold))
 
-            # Check if stop loss or take-profit is triggered
+            # Check if stop loss is triggered
             if current_portfolio_value <= trailing_stop_loss:
-                # Calculate the actual monetary loss
-                monetary_loss = current_portfolio_value - trailing_stop_loss
-                # Update the stop loss amount in the DataFrame with the monetary loss
-                data['stop_loss_amount'].iloc[i] = abs(monetary_loss)  # Use absolute value for clarity
-                data['stop_loss_triggered'].iloc[i] = True
-                data['predicted'].iloc[i] = 0  # Force position to close
+                # Calculate how far below the trailing stop your portfolio is
+                monetary_loss = trailing_stop_loss - current_portfolio_value  # Typically positive
+
+                # Record this stop-loss event exactly once on the row that triggers closure
+                data['stop_loss_amount'].iloc[i] = monetary_loss
+
+                # Force the strategy to close on this bar
+                data['predicted'].iloc[i] = 0
             else:
-                # When stop loss is not triggered, set stop_loss_amount to zero
+                # No stop triggered → set zero so the sum won't inflate
                 data['stop_loss_amount'].iloc[i] = 0
-                data['stop_loss_triggered'].iloc[i] = False  # Ensure stop_loss_triggered is False
 
-            # Take-profit logic remains unchanged
-            if current_portfolio_value >= initial_investment * (1 + gain_threshold):
-                data['take_profit_triggered'].iloc[i] = True
-                data['predicted'].iloc[i] = 0  # Force position to close
-
-        # --- Liquidation Check ---
-        if position_open:
-            # Calculate notional value
-            notional = data['position_size'].iloc[i] * data['close'].iloc[i]
-
-            # Calculate Account Margin Ratio (AMR)
-            total_collateral_value = data['cash'].iloc[i] + pnl
-            account_margin_ratio = total_collateral_value / abs(notional)
-
-            # Calculate Maintenance Margin Ratio (MMR)
-            _, mmr = get_margin_ratios(notional)
-
-            # Check if liquidation is triggered
-            if account_margin_ratio < mmr:
-                # Determine liquidation type (Low Tier or High Tier)
-                liquidation_fee, liquidator_fee = get_liquidation_fees(asset, leverage)
-                user_liquidation_fee = liquidation_fee * abs(notional)
-                liquidator_fee_total = liquidator_fee * abs(notional)
-
-                # Apply liquidation
-                data['liquidation'].iloc[i] = 1
-                total_liquidation_amount += data['strategy_portfolio_value'].iloc[i - 1] - liquidation_threshold
-                data['cash'].iloc[i] = data['strategy_portfolio_value'].iloc[i - 1] - liquidation_threshold - user_liquidation_fee - liquidator_fee_total
-                data['position'].iloc[i] = 0
-                data['position_size'].iloc[i] = 0
-                data['margin_used'].iloc[i] = 0
-                position_open = False
-
-    # Take-profit logic remains unchanged
-    if current_portfolio_value >= initial_investment * (1 + gain_threshold):
-        data['take_profit_triggered'].iloc[i] = True
-        data['predicted'].iloc[i] = 0  # Force position to close
-
-    # Take-profit logic remains unchanged
-    if current_portfolio_value >= initial_investment * (1 + gain_threshold):
-        data['take_profit_triggered'].iloc[i] = True
-        data['predicted'].iloc[i] = 0  # Force position to close
         # --- Liquidation Check ---
         if position_open:
             # Calculate notional value
@@ -646,6 +670,16 @@ async def backtest(data, model, features, initial_investment=100, stop_loss_thre
 
             # Calculate liquidation threshold
             liquidation_threshold = total_collateral_value - (mmr * abs(notional))
+
+            # Calculate liquidation price
+            if data['position'].iloc[i] == 1:  # Long position
+                liquidation_price = last_position_price * (1 - mmr)
+            else:  # Short position
+                liquidation_price = last_position_price * (1 + mmr)
+
+            # Update liquidation price and amount columns
+            data['liquidation_price'].iloc[i] = liquidation_price
+            data['liquidation_amount'].iloc[i] = liquidation_threshold
 
             # Check if liquidation is triggered
             if account_margin_ratio < mmr:
@@ -740,10 +774,7 @@ def plot_backtest_results(data, pair, output_file):
     plt.close()
 
 # Updated run_backtest function with logging
-async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05, 
-                       initial_investment=10000, gain_threshold=0.001
-                       , leverage=1, features=None
-                       , withdraw_percentage=0.7, compound_percentage=0.3, num_trades=None):
+async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05, initial_investment=10000, gain_threshold=0.001, leverage=1, features=None, withdraw_percentage=0.7, compound_percentage=0.3, num_trades=None):
     start = datetime.now()
     logger.info("Starting backtest")
 
@@ -800,7 +831,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
 
         # Proceed with backtest using `final_features`
         backtest_result, total_liquidation_amount = await backtest(
-            data
+              data
             , model
             , used_features
             , initial_investment
@@ -816,45 +847,46 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
 
         # Calculate key metrics
         total_funding_payments = backtest_result['funding_payments'].sum()
-        total_compounded_profit = backtest_result['compounded_profit'].sum()
         total_trading_fees = backtest_result['trading_fees'].sum()
-        total_strategy_value = initial_investment + total_compounded_profit
-        final_percentage_gain_loss = ((total_strategy_value - initial_investment) / initial_investment) * 100
+        total_taker_fees = backtest_result['taker_fee_amount'].sum()
+        total_stop_loss_amount = backtest_result['stop_loss_amount'].sum()
+
+        # Use the last row of the 'cash' column as the final strategy value
+        final_strategy_value = backtest_result['cash'].iloc[-1]
+        total_compounded_profit = final_strategy_value - initial_investment
+        final_percentage_gain_loss = ((final_strategy_value - initial_investment) / initial_investment) * 100
 
         # Generate result explanation
         result_explanation = (
-            f"**Asset Traded:** {pair}\n\n"  # Show the asset traded (e.g., BTC, ETH)
+            f"**Asset Traded:** {pair}\n\n"
             f"**Timeframe:** {timeframe}\n"
             f"**Trading dates:** {values}\n\n"
             f"**Initial investment:** ${initial_investment:.2f}\n"
             f"**Final percentage gain/loss:** {final_percentage_gain_loss:.2f}% 💹\n"
-            f"**Total strategy value (capital + compounded):** ${total_strategy_value:.2f}\n"
+            f"**Total strategy value (capital + compounded):** ${final_strategy_value:.2f}\n"
             f"**Profit withdrawn:** ${backtest_result['profit_withdrawn'].sum():.2f}  🚀\n"
             f"**Profit withdrawn percentage:** {withdraw_percentage * 100:.2f}%\n"
             f"**Compounded profit:** ${total_compounded_profit:.2f}  🚀\n"
-            f"**Compounded profit percentage:** {compound_percentage * 100:.2f}%\n"
+            f"**Compounded profit percentage:** {compound_percentage * 100:.2f}%\n\n"
             f"**Total funding payments:** ${total_funding_payments:.2f}\n"
             f"**Total liquidation amount:** ${total_liquidation_amount:.2f}\n"
-            f"**Total trading fees:** ${total_trading_fees:.2f}\n"
+            f"**Total stop-loss amount:** ${total_stop_loss_amount:.2f}\n"
+            f"**Total maker fees:** ${total_trading_fees:.2f}\n"
+            f"**Total taker fees:** ${total_taker_fees:.2f}\n"
             f"**Gain threshold:** {gain_threshold * 100:.2f}%\n"
             f"**Stop-loss threshold:** {stop_loss_threshold * 100:.2f}%\n"
             f"**Leverage used:** {leverage}x\n"
-            f"**Number of trades executed:** {backtest_result['position'].abs().sum()}\n"  # Count number of trades
+            f"**Number of trades executed:** {backtest_result['position'].abs().sum()}\n"
             f"**Strategy name:** {get_strategy_name(timeframe, features)}\n"
             f"**Used Features:** {used_features}\n\n"
             f"**Execution time:** {datetime.now() - start}"
         )
-        logger.info(result_explanation)
+        transtaled_result_explanation = translate(result_explanation, token)
+        logger.info(transtaled_result_explanation)
         # await send_bot_message(token, result_explanation)
 
         # Save results to an Excel file with only relevant columns
         logger.info("Saving results to Excel file")
-        relevant_columns = [
-            'start_timestamp', 'close', 'position', 'position_size', 'margin_used',
-            'funding_payments', 'strategy_portfolio_value', 'liquidation',
-            'profit_withdrawn', 'compounded_profit', 'notional_value', 'stop_loss_triggered', 'take_profit_triggered'
-            , 'stop_loss_amount'
-        ]
 
         # Add new columns for open/close position, taker/maker fees, and liquidation price
         backtest_result['open_close_position'] = backtest_result['position'].apply(
@@ -868,37 +900,56 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             0: 'hold'
         }
         backtest_result['position'] = backtest_result['position'].map(position_map)
-
         
+       
         # Define the exact column order you want
         final_columns = [
             "start_timestamp",
-            "close",
             "position",
-            "open_close_position",
-            "position_size",
-            "margin_used",
-            "funding_payments",
-            "strategy_portfolio_value",
-            "liquidation",
-            "profit_withdrawn",
-            "compounded_profit",
-            "leveraged_taker_fee",
-            "leveraged_maker_fee",
+            "close",
+            "close_pct_change",
             "liquidation_price",
             "liquidation_amount",
-            "notional_value", 
-            "stop_loss_triggered",
-            "take_profit_triggered",
-            "stop_loss_amount"
+            "cash",
+            "position_size",
+            "open_close_position",
+            "stop_loss_amount",
+            "margin_used",
+            "funding_payments",  
+            "liquidation",
+            "profit_withdrawn",
+            "strategy_portfolio_value",
+            "realized_profit",
+            "compounded_profit",
+            "taker_fee_amount",
+            "trading_fees",
         ]
 
-        # Save to Excel with the specified column order
-        # backtest_result[final_columns].to_excel(output_file, index=False)
-        backtest_result.to_excel(output_file, index=False)
+        # Create a copy of the DataFrame for Excel formatting
+        formatted_result = backtest_result.copy()
+        
+        # Format columns for Excel output
+        formatted_result["close_pct_change"] = formatted_result["close_pct_change"].map('{:.2%}'.format)
+        formatted_result["close"] = formatted_result["close"].map('{:.6f}'.format)
+        formatted_result["liquidation_price"] = formatted_result["liquidation_price"].map('{:.6f}'.format)
+        formatted_result["liquidation_amount"] = formatted_result["liquidation_amount"].map('{:.2f}'.format)
+        formatted_result["cash"] = formatted_result["cash"].map('{:.2f}'.format)
+        formatted_result["position_size"] = formatted_result["position_size"].map('{:.2f}'.format)
+        formatted_result["stop_loss_amount"] = formatted_result["stop_loss_amount"].map('{:.2f}'.format)
+        formatted_result["margin_used"] = formatted_result["margin_used"].map('{:.2f}'.format)
+        formatted_result["funding_payments"] = formatted_result["funding_payments"].map('{:.2f}'.format)
+        formatted_result["strategy_portfolio_value"] = formatted_result["strategy_portfolio_value"].map('{:.2f}'.format)
+        formatted_result["liquidation"] = formatted_result["liquidation"].map('{:.0f}'.format)
+        formatted_result["profit_withdrawn"] = formatted_result["profit_withdrawn"].map('{:.2f}'.format)
+        formatted_result["realized_profit"] = formatted_result["realized_profit"].map('{:.2f}'.format)
+        formatted_result["compounded_profit"] = formatted_result["compounded_profit"].map('{:.2f}'.format)
+        formatted_result["taker_fee_amount"] = formatted_result["taker_fee_amount"].map('{:.2f}'.format)
+        formatted_result["trading_fees"] = formatted_result["trading_fees"].map('{:.2f}'.format)
 
-        # Plot the results and save the plot as PNG
-        logger.info("Plotting backtest results")
+        # Save to Excel with the specified column order using formatted data
+        formatted_result[final_columns].to_excel(output_file, index=False)
+        
+        # Plot using the original numeric data
         plot_backtest_results(backtest_result, pair, output_file)
 
         # Delete local model file after upload

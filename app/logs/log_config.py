@@ -45,3 +45,25 @@ if not gainers_logger.hasHandlers():
     gainers_handler.setFormatter(formatter)
     gainers_logger.addHandler(gainers_handler)
 
+# Configure gainers logger
+signal_logger = logging.getLogger('signal_logger')
+if not signal_logger.hasHandlers():
+    signal_logger.setLevel(logging.DEBUG)
+
+    signal_handler = DateRotatingFileHandler('logs/signal.log', maxBytes=5*1024*1024, backupCount=0)
+    signal_handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    signal_handler.setFormatter(formatter)
+    signal_logger.addHandler(signal_handler)    
+
+
+# Configure scalper logger
+scalper_logger = logging.getLogger('scalper_logger')
+if not scalper_logger.hasHandlers():
+    scalper_logger.setLevel(logging.DEBUG)
+
+    scalper_handler = DateRotatingFileHandler('logs/scalper.log', maxBytes=5*1024*1024, backupCount=0)
+    scalper_handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    scalper_handler.setFormatter(formatter)
+    scalper_logger.addHandler(scalper_handler)
