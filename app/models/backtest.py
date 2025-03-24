@@ -12,6 +12,7 @@ import matplotlib.dates as mdates
 import requests
 import redis.asyncio as redis
 import logging
+from collections import Counter
 from app.models.bucket import download_model
 from deep_translator import GoogleTranslator
 
@@ -394,7 +395,7 @@ async def backtest(
     features,
     initial_investment=100,
     stop_loss_threshold=0.02,
-    gain_threshold=0.005,
+    take_profit_threshold=0.005,
     leverage=5,
     withdraw_percentage=0.7,
     compound_percentage=0.3,
@@ -428,6 +429,30 @@ async def backtest(
 
     # --- 1️⃣ Prepare Data ---
     data = data.dropna().copy()
+
+    y_proba = model.predict_proba(data[features])
+    proba_df = pd.DataFrame(y_proba, columns=model.classes_)
+
+    # 🔧 Confidence threshold to avoid weak signals
+    min_confidence = 0.35
+
+    # 🔍 Choose class with highest probability if it's confident enough
+    y_custom = []
+    for _, row in proba_df.iterrows():
+        best_class = row.idxmax()  # Most likely class (-1, 0, or 1)
+        if row[best_class] >= min_confidence:
+            y_custom.append(best_class)
+        else:
+            y_custom.append(0)  # Treat as hold if not confident enough
+
+    data['predicted'] = y_custom
+
+    # Print signal distribution
+    signal_distribution = dict(Counter(y_custom))
+    print("📊 Model Signal Distribution:", signal_distribution)
+    avg_probs = pd.DataFrame(y_proba, columns=model.classes_).mean()
+    print("🔍 Avg Prediction Probabilities:", avg_probs.to_dict())
+
 
     # Add a new column for percentage change in 'close'
     data['close_pct_change'] = data['close'].pct_change()  # Percentage change between current and previous 'close'
@@ -512,10 +537,15 @@ async def backtest(
         imr = max(1 / leverage, base_imr, imr_factor * abs(position_notional) ** (4 / 5))
         mmr = max(base_mmr, base_mmr / base_imr * imr_factor * abs(position_notional) ** (4 / 5))
         return imr, mmr
+    
+    executed_longs = 0
+    executed_shorts = 0
+    winning_trades = 0 
 
     # --- 6️⃣ Iterate Over Data ---
     for i in range(1, len(data)):
         if num_trades is not None and trade_count >= num_trades:
+            print(f"Trade limit reached. Stopping at trade {trade_count}")
             break  # Stop if the number of trades reaches the limit
 
         funding_payment = 0
@@ -530,6 +560,7 @@ async def backtest(
         # --- Trade Execution Logic ---
         if data['predicted'].iloc[i - 1] == 1:  # Long signal
             if not position_open:
+                executed_longs += 1
                 # Calculate position size and trading fees (maker fee for opening)
                 position_size = (data['cash'].iloc[i - 1] * leverage / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
                 trading_fee = position_size * data['close'].iloc[i] * MAKER_FEE  # Maker fee for opening the position
@@ -556,6 +587,7 @@ async def backtest(
 
         elif data['predicted'].iloc[i - 1] == -1:  # Short signal
             if not position_open:
+                executed_shorts += 1
                 # Calculate position size and trading fees (maker fee for opening)
                 position_size = (data['cash'].iloc[i - 1] * leverage / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
                 trading_fee = position_size * data['close'].iloc[i] * MAKER_FEE  # Maker fee for opening the position
@@ -593,17 +625,14 @@ async def backtest(
                 # 3) Apply taker fee to realized profit (this can be negative if pnl < 0)
                 realized_profit = pnl * (1 - TAKER_FEE * leverage)
                 data['realized_profit'].iloc[i] = realized_profit
+               
 
                 # ───────────────────────────────────────────────────────────────────
-                # 4) Subtract/Add the realized PnL from cash — whether negative or positive
-                # ───────────────────────────────────────────────────────────────────
-                data['cash'].iloc[i] = data['cash'].iloc[i - 1] + realized_profit
-
-                # ───────────────────────────────────────────────────────────────────
-                # 5) If realized PnL is positive, then split between withdrawal & compounding
+                # 4) If realized PnL is positive, then split between withdrawal & compounding
                 #    Otherwise, no withdrawal or compounding occurs on a losing trade.
                 # ───────────────────────────────────────────────────────────────────
                 if realized_profit > 0:
+                    winning_trades += 1
                     withdrawn_profit = realized_profit * withdraw_percentage if withdraw_percentage > 0 else 0
                     compounded_profit = realized_profit * compound_percentage if compound_percentage > 0 else 0
 
@@ -613,10 +642,11 @@ async def backtest(
                     data['profit_withdrawn'].iloc[i] = withdrawn_profit
                     data['compounded_profit'].iloc[i] = compounded_profit
                 else:
+                    data['cash'].iloc[i] = data['cash'].iloc[i - 1] + realized_profit
                     data['profit_withdrawn'].iloc[i] = 0.0
                     data['compounded_profit'].iloc[i] = 0.0
 
-                # 6) Close the position
+                # 5) Close the position
                 data['position'].iloc[i] = 0
                 data['position_size'].iloc[i] = 0
                 data['margin_used'].iloc[i] = 0
@@ -636,26 +666,32 @@ async def backtest(
             data['strategy_portfolio_value'].iloc[i] = data['cash'].iloc[i]
 
         # --- Stop-Loss & Take-Profit ---
+        entry_price = last_position_price
+        current_price = data['close'].iloc[i]
+
         if position_open:
-            current_portfolio_value = data['strategy_portfolio_value'].iloc[i]
+            if data['position'].iloc[i] == 1:  # Long
+                # Stop-loss check
+                if current_price <= entry_price * (1 - stop_loss_threshold):
+                    data['stop_loss_amount'].iloc[i] = (entry_price - current_price) * data['position_size'].iloc[i]
+                    data['predicted'].iloc[i] = 0  # Close position
+                
+                # Take-profit check
+                elif current_price >= entry_price * (1 + take_profit_threshold):
+                    data['predicted'].iloc[i] = 0  # Close position (take profit)
 
-            # Update your trailing stop logic
-            trailing_stop_loss = max(trailing_stop_loss, current_portfolio_value * (1 - stop_loss_threshold))
+            elif data['position'].iloc[i] == -1:  # Short
+                # Stop-loss check
+                if current_price >= entry_price * (1 + stop_loss_threshold):
+                    data['stop_loss_amount'].iloc[i] = (current_price - entry_price) * data['position_size'].iloc[i]
+                    data['predicted'].iloc[i] = 0  # Close position
 
-            # Check if stop loss is triggered
-            if current_portfolio_value <= trailing_stop_loss:
-                # Calculate how far below the trailing stop your portfolio is
-                monetary_loss = trailing_stop_loss - current_portfolio_value  # Typically positive
+                # Take-profit check
+                elif current_price <= entry_price * (1 - take_profit_threshold):
+                    data['predicted'].iloc[i] = 0  # Close position (take profit)
 
-                # Record this stop-loss event exactly once on the row that triggers closure
-                data['stop_loss_amount'].iloc[i] = monetary_loss
 
-                # Force the strategy to close on this bar
-                data['predicted'].iloc[i] = 0
-            else:
-                # No stop triggered → set zero so the sum won't inflate
-                data['stop_loss_amount'].iloc[i] = 0
-
+                    
         # --- Liquidation Check ---
         if position_open:
             # Calculate notional value
@@ -697,7 +733,10 @@ async def backtest(
                 data['margin_used'].iloc[i] = 0
                 position_open = False
 
-    return data, total_liquidation_amount
+    trade_accuracy = winning_trades / trade_count if trade_count else 0
+    print(f"📈 Model Trade Accuracy: {trade_accuracy:.2%} ({winning_trades} winning trades out of {trade_count})")
+
+    return data, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy
 
 
 # Plot data
@@ -774,7 +813,7 @@ def plot_backtest_results(data, pair, output_file):
     plt.close()
 
 # Updated run_backtest function with logging
-async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05, initial_investment=10000, gain_threshold=0.001, leverage=1, features=None, withdraw_percentage=0.7, compound_percentage=0.3, num_trades=None):
+async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05, initial_investment=10000, take_profit_threshold=0.001, leverage=1, features=None, withdraw_percentage=0.7, compound_percentage=0.3, num_trades=None):
     start = datetime.now()
     logger.info("Starting backtest")
 
@@ -830,13 +869,13 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             data['market_portfolio_value'] = initial_investment  # Default to initial investment
 
         # Proceed with backtest using `final_features`
-        backtest_result, total_liquidation_amount = await backtest(
+        backtest_result, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy = await backtest(
               data
             , model
             , used_features
             , initial_investment
             , stop_loss_threshold
-            , gain_threshold
+            , take_profit_threshold
             , leverage
             , withdraw_percentage
             , compound_percentage
@@ -851,10 +890,23 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         total_taker_fees = backtest_result['taker_fee_amount'].sum()
         total_stop_loss_amount = backtest_result['stop_loss_amount'].sum()
 
+
         # Use the last row of the 'cash' column as the final strategy value
         final_strategy_value = backtest_result['cash'].iloc[-1]
         total_compounded_profit = final_strategy_value - initial_investment
         final_percentage_gain_loss = ((final_strategy_value - initial_investment) / initial_investment) * 100
+
+        # Calculate model accuracy
+        signal_counts = backtest_result['position'].value_counts().to_dict()
+
+        # Count signal distribution
+        signal_distribution = backtest_result['predicted'].value_counts().to_dict()
+
+        # Identify executed trades and their outcomes
+        executed_trades = backtest_result[backtest_result['realized_profit'] != 0]
+        winning_trades = executed_trades[executed_trades['realized_profit'] > 0]
+        trade_count = len(executed_trades)
+        trade_accuracy = len(winning_trades) / trade_count if trade_count > 0 else 0
 
         # Generate result explanation
         result_explanation = (
@@ -873,12 +925,15 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             f"**Total stop-loss amount:** ${total_stop_loss_amount:.2f}\n"
             f"**Total maker fees:** ${total_trading_fees:.2f}\n"
             f"**Total taker fees:** ${total_taker_fees:.2f}\n"
-            f"**Gain threshold:** {gain_threshold * 100:.2f}%\n"
+            f"**Take Profit threshold:** {take_profit_threshold * 100:.2f}%\n"
             f"**Stop-loss threshold:** {stop_loss_threshold * 100:.2f}%\n"
             f"**Leverage used:** {leverage}x\n"
-            f"**Number of trades executed:** {backtest_result['position'].abs().sum()}\n"
-            f"**Strategy name:** {get_strategy_name(timeframe, features)}\n"
-            f"**Used Features:** {used_features}\n\n"
+            f"**Number of trades executed:** {trade_count}\n"
+            f"**Strategy name:** {get_strategy_name(timeframe, features)}\n\n"
+            f"**Used Features:** {used_features}\n"
+            f"📊 **Model Signal Distribution:** {signal_distribution}\n"
+            f"🎯 **Trade Accuracy:** {trade_accuracy:.2%} "
+            f"({len(winning_trades)} winning trades out of {trade_count})\n\n"
             f"**Execution time:** {datetime.now() - start}"
         )
         transtaled_result_explanation = translate(result_explanation, token)
@@ -974,7 +1029,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
 #     initial_investment = 100
 #     maker_fee = 0.001
 #     taker_fee = 0.001
-#     gain_threshold = 0.01
+#     take_profit_threshold = 0.01
 #     leverage = 1
 
-#     print(run_backtest(pair, timeframe, token, values, stop_loss_threshold, initial_investment, maker_fee, taker_fee, gain_threshold, leverage))
+#     print(run_backtest(pair, timeframe, token, values, stop_loss_threshold, initial_investment, maker_fee, taker_fee, take_profit_threshold, leverage))

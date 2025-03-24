@@ -14,7 +14,7 @@ def run_backtest_task(
     , values
     , stop_loss_threshold=0.05
     , initial_investment=10000
-    , gain_threshold=0.001
+    , take_profit_threshold=0.001
     , leverage=1
     , features=None
     , withdraw_percentage=0.7
@@ -37,7 +37,7 @@ def run_backtest_task(
             values, 
             stop_loss_threshold, 
             initial_investment, 
-            gain_threshold,
+            take_profit_threshold,
             leverage,
             features,
             withdraw_percentage,

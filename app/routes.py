@@ -14,7 +14,7 @@ class BacktestRequest(BaseModel):
     initial_investment: float = 10000
     maker_fee: float = 0.001
     taker_fee: float = 0.001
-    gain_threshold: float = 0.001
+    take_profit_threshold: float = 0.001
     leverage: int = 1
     features: Optional[List[str]] = None,
     withdraw_percentage: float = 0.7,
@@ -37,7 +37,7 @@ async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
             backtest_request.values,
             backtest_request.stop_loss_threshold,
             backtest_request.initial_investment,
-            backtest_request.gain_threshold,
+            backtest_request.take_profit_threshold,
             backtest_request.leverage,
             backtest_request.features,
             backtest_request.withdraw_percentage,
