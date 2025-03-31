@@ -341,48 +341,54 @@ def fetch_margin_ratios(symbol):
     else:
         raise Exception(f"Failed to fetch data for {symbol}. Status code: {response.status_code}")
 
+
 def get_strategy_name(timeframe, features):
+    base_features = ["close", "high", "low", "volume"]
     strategy_features = {
         "5m": {
-            "Trend-Following": ["ema_12", "ema_26", "macd", "macd_signal", "adx", "vwap"],
-            "Volatility Breakout": ["atr_14", "bollinger_hband_20", "bollinger_lband_20", "std_20", "vwap"],
-            "Momentum Reversal": ["rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "vwap"],
-            "Momentum + Volatility": ["rsi_14", "atr_14", "bollinger_hband_20", "bollinger_lband_20", "roc_10", "momentum_10", "vwap"],
-            "Hybrid": ["ema_12", "ema_26", "atr_14", "bollinger_hband_20", "rsi_14", "macd", "vwap"],
-            "Advanced": ["tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"]
+            "Trend-Following": {"features": base_features + ["ema_12", "ema_26", "macd", "macd_signal", "adx", "vwap"], "force_features": True},
+            "Volatility Breakout": {"features": base_features + ["atr_14", "bollinger_hband", "bollinger_lband", "std_20", "vwap"], "force_features": True},
+            "Momentum Reversal": {"features": base_features + ["rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "vwap"], "force_features": True},
+            "Momentum + Volatility": {"features": base_features + ["rsi_14", "atr_14", "bollinger_hband", "bollinger_lband", "roc_10", "momentum_10", "vwap"], "force_features": True},
+            "Hybrid": {"features": base_features + ["ema_12", "ema_26", "atr_14", "bollinger_hband", "rsi_14", "macd", "vwap"], "force_features": True},
+            "Advanced": {"features": base_features + ["tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"], "force_features": True},
+            "Router": {"features": ["ema_12", "ema_26", "macd", "macd_signal", "adx", "atr_14", "bollinger_hband", "bollinger_lband", "std_20", "rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"], "force_features": False}
         },
         "1h": {
-            "Trend-Following": ["ema_20", "ema_50", "macd", "macd_signal", "adx", "vwap"],
-            "Volatility Breakout": ["atr_14", "bollinger_hband_20", "bollinger_lband_20", "std_20", "vwap"],
-            "Momentum Reversal": ["rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "vwap"],
-            "Momentum + Volatility": ["rsi_14", "atr_14", "bollinger_hband_20", "bollinger_lband_20", "roc_10", "momentum_10", "vwap"],
-            "Hybrid": ["ema_20", "ema_50", "atr_14", "bollinger_hband_20", "rsi_14", "macd", "vwap"],
-            "Advanced": ["tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"]
+            "Trend-Following": {"features": base_features + ["ema_20", "ema_50", "macd", "macd_signal", "adx", "vwap"], "force_features": True},
+            "Volatility Breakout": {"features": base_features + ["atr_14", "bollinger_hband", "bollinger_lband", "std_20", "vwap"], "force_features": True},
+            "Momentum Reversal": {"features": base_features + ["rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "vwap"], "force_features": True},
+            "Momentum + Volatility": {"features": base_features + ["rsi_14", "atr_14", "bollinger_hband", "bollinger_lband", "roc_10", "momentum_10", "vwap"], "force_features": True},
+            "Hybrid": {"features": base_features + ["ema_20", "ema_50", "atr_14", "bollinger_hband", "rsi_14", "macd", "vwap"], "force_features": True},
+            "Advanced": {"features": base_features + ["tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"], "force_features": True},
+            "Router": {"features": ["ema_12", "ema_26", "macd", "macd_signal", "adx", "atr_14", "bollinger_hband", "bollinger_lband", "std_20", "rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"], "force_features": False}
         },
         "4h": {
-            "Trend-Following": ["ema_50", "ema_200", "macd", "macd_signal", "adx", "vwap"],
-            "Volatility Breakout": ["atr_14", "bollinger_hband_20", "bollinger_lband_20", "std_20", "vwap"],
-            "Momentum Reversal": ["rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "vwap"],
-            "Momentum + Volatility": ["rsi_14", "atr_14", "bollinger_hband_20", "bollinger_lband_20", "roc_10", "momentum_10", "vwap"],
-            "Hybrid": ["ema_50", "ema_200", "atr_14", "bollinger_hband_20", "rsi_14", "macd", "vwap"],
-            "Advanced": ["tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"]
+            "Trend-Following": {"features": base_features + ["ema_50", "ema_200", "macd", "macd_signal", "adx", "vwap"], "force_features": True},
+            "Volatility Breakout": {"features": base_features + ["atr_14", "bollinger_hband", "bollinger_lband", "std_20", "vwap"], "force_features": True},
+            "Momentum Reversal": {"features": base_features + ["rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "vwap"], "force_features": True},
+            "Momentum + Volatility": {"features": base_features + ["rsi_14", "atr_14", "bollinger_hband", "bollinger_lband", "roc_10", "momentum_10", "vwap"], "force_features": True},
+            "Hybrid": {"features": base_features + ["ema_50", "ema_200", "atr_14", "bollinger_hband", "rsi_14", "macd", "vwap"], "force_features": True},
+            "Advanced": {"features": base_features + ["tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"], "force_features": True},
+            "Router": {"features": ["ema_12", "ema_26", "macd", "macd_signal", "adx", "atr_14", "bollinger_hband", "bollinger_lband", "std_20", "rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"], "force_features": False}
         },
         "1d": {
-            "Trend-Following": ["ema_50", "ema_200", "macd", "macd_signal", "adx", "vwap"],
-            "Volatility Breakout": ["atr_14", "bollinger_hband_20", "bollinger_lband_20", "std_20", "vwap"],
-            "Momentum Reversal": ["rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "vwap"],
-            "Momentum + Volatility": ["rsi_14", "atr_14", "bollinger_hband_20", "bollinger_lband_20", "roc_10", "momentum_10", "vwap"],
-            "Hybrid": ["ema_50", "ema_200", "atr_14", "bollinger_hband_20", "rsi_14", "macd", "vwap"],
-            "Advanced": ["tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"]
+            "Trend-Following": {"features": base_features + ["ema_50", "ema_200", "macd", "macd_signal", "adx", "vwap"], "force_features": True},
+            "Volatility Breakout": {"features": base_features + ["atr_14", "bollinger_hband", "bollinger_lband", "std_20", "vwap"], "force_features": True},
+            "Momentum Reversal": {"features": base_features + ["rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "vwap"], "force_features": True},
+            "Momentum + Volatility": {"features": base_features + ["rsi_14", "atr_14", "bollinger_hband", "bollinger_lband", "roc_10", "momentum_10", "vwap"], "force_features": True},
+            "Hybrid": {"features": base_features + ["ema_50", "ema_200", "atr_14", "bollinger_hband", "rsi_14", "macd", "vwap"], "force_features": True},
+            "Advanced": {"features": base_features + ["tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"], "force_features": True},
+            "Router": {"features": ["ema_12", "ema_26", "macd", "macd_signal", "adx", "atr_14", "bollinger_hband", "bollinger_lband", "std_20", "rsi_14", "stoch_k_14", "stoch_d_14", "roc_10", "momentum_10", "tenkan_sen_9", "kijun_sen_26", "senkou_span_a", "senkou_span_b", "sar", "vwap"], "force_features": False}
         }
     }
 
     # Check if the timeframe exists in the strategy_features
     if timeframe in strategy_features:
         # Iterate through the strategies in the given timeframe
-        for strategy_name, strategy_feature_list in strategy_features[timeframe].items():
+        for strategy_name, strategy_data in strategy_features[timeframe].items():
             # Check if the features match the strategy's feature list
-            if sorted(features) == sorted(strategy_feature_list):
+            if sorted(features) == sorted(strategy_data["features"]):
                 return strategy_name
 
     # If no match is found, return None or a default value
@@ -434,30 +440,38 @@ async def backtest(
     proba_df = pd.DataFrame(y_proba, columns=model.classes_)
 
     # 🔧 Confidence threshold to avoid weak signals
-    min_confidence = 0.35
+    # Step 1: Get the class-wise probabilities
+    class_probs = proba_df.mean()  # Average confidence for each class
 
-    # 🔍 Choose class with highest probability if it's confident enough
+    # 🛠 Step 2: Dynamically calculate thresholds for each class using percentiles
+    # For each class (e.g., -1, 0, 1), compute the Nth percentile (e.g., 50th percentile = median)
+    # This acts as a confidence threshold — only predictions stronger than the typical value are used
+    thresholds = {}
+    for cls in model.classes_:
+        cls_probs = proba_df[cls]  # Get all predicted probabilities for this class
+        thresholds[cls] = np.percentile(cls_probs, 50)  # 👈 Tune this percentile (e.g., 50, 60, 70)
+
+    # 🧠 Step 3: Apply the thresholds to generate confident predictions
     y_custom = []
     for _, row in proba_df.iterrows():
-        best_class = row.idxmax()  # Most likely class (-1, 0, or 1)
-        if row[best_class] >= min_confidence:
-            y_custom.append(best_class)
+        best_class = row.idxmax()  # Get class with highest probability for this row
+        if row[best_class] >= thresholds[best_class]:
+            y_custom.append(best_class)  # ✅ Confident prediction, accept the class
         else:
-            y_custom.append(0)  # Treat as hold if not confident enough
+            y_custom.append(0)  # ⚖️ Not confident enough, fallback to neutral (hold)
+
+
 
     data['predicted'] = y_custom
 
+
     # Print signal distribution
     signal_distribution = dict(Counter(y_custom))
-    print("📊 Model Signal Distribution:", signal_distribution)
-    avg_probs = pd.DataFrame(y_proba, columns=model.classes_).mean()
-    print("🔍 Avg Prediction Probabilities:", avg_probs.to_dict())
-
+    long_conf = proba_df[1].mean()
+    short_conf = proba_df[-1].mean()
 
     # Add a new column for percentage change in 'close'
     data['close_pct_change'] = data['close'].pct_change()  # Percentage change between current and previous 'close'
-
-    data['predicted'] = model.predict(data[features])
     
     # Initialize strategy-specific columns
     data['strategy_return'] = 0.0
@@ -482,7 +496,6 @@ async def backtest(
     last_position_price = 0
     last_funding_time = 0  
     trade_count = 0  # Track the number of trades
-    trailing_stop_loss = initial_investment * (1 - stop_loss_threshold)  # Initialize trailing stop loss
 
     # --- 2️⃣ Get Fees and Rates ---
     funding_rate_map = {
@@ -734,9 +747,8 @@ async def backtest(
                 position_open = False
 
     trade_accuracy = winning_trades / trade_count if trade_count else 0
-    print(f"📈 Model Trade Accuracy: {trade_accuracy:.2%} ({winning_trades} winning trades out of {trade_count})")
 
-    return data, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy
+    return data, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy, long_conf, short_conf
 
 
 # Plot data
@@ -819,8 +831,8 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
 
     # Generate dynamic file names
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
-    MODEL_KEY = f'Mockba/trained_models/trained_model_{pair}_{timeframe}_{model_name}.pkl'
-    local_model_path = f'temp/trained_model_{pair}_{timeframe}_{model_name}.pkl'
+    MODEL_KEY = f'Mockba/trained_models/trained_model_{pair}_{timeframe}_{model_name}.joblib'
+    local_model_path = f'temp/trained_model_{pair}_{timeframe}_{model_name}.joblib'
     output_file = f'files/backtest_results_{pair}_{timeframe}_{token}_{model_name}.xlsx'
 
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
@@ -869,7 +881,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             data['market_portfolio_value'] = initial_investment  # Default to initial investment
 
         # Proceed with backtest using `final_features`
-        backtest_result, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy = await backtest(
+        backtest_result, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy, long_conf, short_conf = await backtest(
               data
             , model
             , used_features
@@ -895,12 +907,6 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         final_strategy_value = backtest_result['cash'].iloc[-1]
         total_compounded_profit = final_strategy_value - initial_investment
         final_percentage_gain_loss = ((final_strategy_value - initial_investment) / initial_investment) * 100
-
-        # Calculate model accuracy
-        signal_counts = backtest_result['position'].value_counts().to_dict()
-
-        # Count signal distribution
-        signal_distribution = backtest_result['predicted'].value_counts().to_dict()
 
         # Identify executed trades and their outcomes
         executed_trades = backtest_result[backtest_result['realized_profit'] != 0]
@@ -931,7 +937,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             f"**Number of trades executed:** {trade_count}\n"
             f"**Strategy name:** {get_strategy_name(timeframe, features)}\n\n"
             f"**Used Features:** {used_features}\n"
-            f"📊 **Model Signal Distribution:** {signal_distribution}\n"
+            f"🔍 **Avg Prediction Probabilities:** Long: {long_conf:.2f}, Short: {short_conf:.2f}\n"
             f"🎯 **Trade Accuracy:** {trade_accuracy:.2%} "
             f"({len(winning_trades)} winning trades out of {trade_count})\n\n"
             f"**Execution time:** {datetime.now() - start}"
