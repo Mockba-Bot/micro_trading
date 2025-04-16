@@ -399,7 +399,7 @@ async def backtest(
     data,
     model,
     features,
-    initial_investment=100,
+    free_collateral=100,
     stop_loss_threshold=0.02,
     take_profit_threshold=0.005,
     leverage=5,
@@ -408,6 +408,7 @@ async def backtest(
     num_trades=None,
     asset="PERP_APT_USDC",
     timeframe="1h",
+    market_bias="neutral",  # 'bullish', 'bearish', or 'neutral'
 ):
     """
     Backtests a perpetual futures trading strategy using a trained model.
@@ -436,34 +437,65 @@ async def backtest(
     # --- 1️⃣ Prepare Data ---
     data = data.dropna().copy()
 
+    # --- Predict class probabilities
     y_proba = model.predict_proba(data[features])
     proba_df = pd.DataFrame(y_proba, columns=model.classes_)
 
-    # 🔧 Confidence threshold to avoid weak signals
-    # Step 1: Get the class-wise probabilities
-    class_probs = proba_df.mean()  # Average confidence for each class
+    # --- 🔍 Step 1: Get average class-wise confidence
+    class_probs = proba_df.mean()
+    # print("📊 Average Confidence per Class:", class_probs.to_dict())
 
-    # 🛠 Step 2: Dynamically calculate thresholds for each class using percentiles
-    # For each class (e.g., -1, 0, 1), compute the Nth percentile (e.g., 50th percentile = median)
-    # This acts as a confidence threshold — only predictions stronger than the typical value are used
+    # --- ⚖️ Step 2: Dynamically adjust thresholds based on class imbalance
+    # --- ⚖️ Adjust thresholds based on class imbalance and market bias ---
+    base_percentile = 50
     thresholds = {}
+
     for cls in model.classes_:
-        cls_probs = proba_df[cls]  # Get all predicted probabilities for this class
-        thresholds[cls] = np.percentile(cls_probs, 50)  # 👈 Tune this percentile (e.g., 50, 60, 70)
+        adjustment = 0
+        if class_probs[cls] < 0.3:
+            adjustment = -10  # Boost underrepresented classes
+        elif class_probs[cls] > 0.5:
+            adjustment = +10  # Penalize dominant classes
 
-    # 🧠 Step 3: Apply the thresholds to generate confident predictions
-    y_custom = []
-    for _, row in proba_df.iterrows():
-        best_class = row.idxmax()  # Get class with highest probability for this row
-        if row[best_class] >= thresholds[best_class]:
-            y_custom.append(best_class)  # ✅ Confident prediction, accept the class
-        else:
-            y_custom.append(0)  # ⚖️ Not confident enough, fallback to neutral (hold)
+        # Extra adjustment based on market bias
+        if market_bias == 'bullish':
+            if cls == 1:
+                adjustment -= 5  # Make long signals easier to trigger
+            elif cls == -1:
+                adjustment += 5  # Make short signals harder
+        elif market_bias == 'bearish':
+            if cls == -1:
+                adjustment -= 5  # Make short signals easier
+            elif cls == 1:
+                adjustment += 5  # Make long signals harder
+
+        percentile = max(10, min(90, base_percentile + adjustment))
+        thresholds[cls] = np.percentile(proba_df[cls], percentile)
+
+    # --- 🧠 Apply class distribution rules to generate predictions ---
+    # Define default signal distribution
+    target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
+
+    # Modify class distribution based on market bias
+    if market_bias == 'bullish':
+        target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}  # More longs
+    elif market_bias == 'bearish':
+        target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}  # More shorts
+
+    n_samples = len(proba_df)
+    target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
+
+    # Start with all hold
+    y_custom = np.zeros(n_samples, dtype=int)
+
+    # Assign top-N short and long predictions
+    for cls in [-1, 1]:
+        top_indices = proba_df[cls].nlargest(target_counts[cls]).index
+        y_custom[top_indices] = cls
 
 
-
+    # Assign predictions
     data['predicted'] = y_custom
-
 
     # Print signal distribution
     signal_distribution = dict(Counter(y_custom))
@@ -475,8 +507,8 @@ async def backtest(
     
     # Initialize strategy-specific columns
     data['strategy_return'] = 0.0
-    data['strategy_portfolio_value'] = initial_investment
-    data['cash'] = initial_investment
+    data['strategy_portfolio_value'] = free_collateral
+    data['cash'] = free_collateral
     data['position'] = 0  # 0 = no position, 1 = long, -1 = short
     data['position_size'] = 0.0
     data['margin_used'] = 0.0
@@ -686,9 +718,17 @@ async def backtest(
             if data['position'].iloc[i] == 1:  # Long
                 # Stop-loss check
                 if current_price <= entry_price * (1 - stop_loss_threshold):
-                    data['stop_loss_amount'].iloc[i] = (entry_price - current_price) * data['position_size'].iloc[i]
-                    data['predicted'].iloc[i] = 0  # Close position
-                
+                    loss = (entry_price - current_price) * data['position_size'].iloc[i]
+                    taker_fee = abs(loss) * TAKER_FEE * leverage
+                    
+                    data['stop_loss_amount'].iloc[i] = abs(loss)
+                    data['realized_profit'].iloc[i] = -abs(loss)
+                    data['taker_fee_amount'].iloc[i] = taker_fee
+                    
+                    data['cash'].iloc[i] -= (abs(loss) + taker_fee)
+                    data['predicted'].iloc[i] = 0  # Force position to close
+
+
                 # Take-profit check
                 elif current_price >= entry_price * (1 + take_profit_threshold):
                     data['predicted'].iloc[i] = 0  # Close position (take profit)
@@ -696,122 +736,118 @@ async def backtest(
             elif data['position'].iloc[i] == -1:  # Short
                 # Stop-loss check
                 if current_price >= entry_price * (1 + stop_loss_threshold):
-                    data['stop_loss_amount'].iloc[i] = (current_price - entry_price) * data['position_size'].iloc[i]
-                    data['predicted'].iloc[i] = 0  # Close position
+                    loss = (current_price - entry_price) * data['position_size'].iloc[i]
+                    taker_fee = abs(loss) * TAKER_FEE * leverage
+                    
+                    data['stop_loss_amount'].iloc[i] = abs(loss)
+                    data['realized_profit'].iloc[i] = -abs(loss)
+                    data['taker_fee_amount'].iloc[i] = taker_fee
+
+                    data['cash'].iloc[i] -= (abs(loss) + taker_fee)
+                    data['predicted'].iloc[i] = 0  # Force position to close
+
 
                 # Take-profit check
                 elif current_price <= entry_price * (1 - take_profit_threshold):
                     data['predicted'].iloc[i] = 0  # Close position (take profit)
 
-
                     
-        # --- Liquidation Check ---
+        # --- 💥 Liquidation Check ---
         if position_open:
-            # Calculate notional value
+            # 1) Notional value of the current position
             notional = data['position_size'].iloc[i] * data['close'].iloc[i]
 
-            # Calculate Account Margin Ratio (AMR)
+            # 2) PnL if the position were closed now
+            pnl = (data['close'].iloc[i] - last_position_price) * data['position_size'].iloc[i] \
+                if data['position'].iloc[i] == 1 else \
+                (last_position_price - data['close'].iloc[i]) * data['position_size'].iloc[i]
+
+            # 3) Collateral = cash + unrealized PnL
             total_collateral_value = data['cash'].iloc[i] + pnl
             account_margin_ratio = total_collateral_value / abs(notional)
 
-            # Calculate Maintenance Margin Ratio (MMR)
+            # 4) Maintenance Margin Ratio (MMR)
             _, mmr = get_margin_ratios(notional)
 
-            # Calculate liquidation threshold
+            # 5) Liquidation threshold (info only)
             liquidation_threshold = total_collateral_value - (mmr * abs(notional))
+            liquidation_price = (
+                last_position_price * (1 - mmr) if data['position'].iloc[i] == 1
+                else last_position_price * (1 + mmr)
+            )
 
-            # Calculate liquidation price
-            if data['position'].iloc[i] == 1:  # Long position
-                liquidation_price = last_position_price * (1 - mmr)
-            else:  # Short position
-                liquidation_price = last_position_price * (1 + mmr)
-
-            # Update liquidation price and amount columns
+            # Save to DataFrame
             data['liquidation_price'].iloc[i] = liquidation_price
             data['liquidation_amount'].iloc[i] = liquidation_threshold
 
-            # Check if liquidation is triggered
+            # 6) Liquidation Trigger
             if account_margin_ratio < mmr:
-                # Determine liquidation type (Low Tier or High Tier)
-                liquidation_fee, liquidator_fee = get_liquidation_fees(asset, leverage)
-                user_liquidation_fee = liquidation_fee * abs(notional)
-                liquidator_fee_total = liquidator_fee * abs(notional)
-
                 # Apply liquidation
+                liquidation_fee, liquidator_fee = get_liquidation_fees(asset, leverage)
+                user_fee = liquidation_fee * abs(notional)
+                liquidator_reward = liquidator_fee * abs(notional)
+
                 data['liquidation'].iloc[i] = 1
-                total_liquidation_amount += data['strategy_portfolio_value'].iloc[i - 1] - liquidation_threshold
-                data['cash'].iloc[i] = data['strategy_portfolio_value'].iloc[i - 1] - liquidation_threshold - user_liquidation_fee - liquidator_fee_total
+                total_liquidation_amount += total_collateral_value
+
+                # 💸 Final cash = whatever remains after liquidation fees
+                new_cash = total_collateral_value - user_fee - liquidator_reward
+                data['cash'].iloc[i] = max(0, new_cash)  # Prevent negative balance
+
+                # Clear position
                 data['position'].iloc[i] = 0
                 data['position_size'].iloc[i] = 0
                 data['margin_used'].iloc[i] = 0
                 position_open = False
+
+                # 🚨 End the backtest if account is drained
+                if data['cash'].iloc[i] <= 0:
+                    print(f"💥 Account fully liquidated on {data['start_timestamp'].iloc[i]}")
+                    break
+
 
     trade_accuracy = winning_trades / trade_count if trade_count else 0
 
     return data, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy, long_conf, short_conf
 
 
-# Plot data
-def plot_backtest_results(data, pair, output_file):
+# Plotting function
+def plot_backtest_results(data, pair, output_file, free_collateral=100):
     """
-    Plots the backtest results, including strategy and market portfolio values,
-    ensuring start_timestamp is correctly converted to datetime.
+    Plots backtest results: strategy portfolio vs. buy-and-hold (market) baseline.
+    Saves plot as .png next to the Excel output.
     """
-    # 1) Make sure we do have a 'start_timestamp'
+    # 1️⃣ Ensure start_timestamp exists and is in datetime
     if 'start_timestamp' not in data.columns:
-        raise KeyError("The 'start_timestamp' column is missing in the data.")
-        
-    # 2) If it's numeric (Unix epochs), figure out if it's in seconds or milliseconds
-    if np.issubdtype(data['start_timestamp'].dtype, np.number):
-        max_ts = data['start_timestamp'].max()
-        # Rough rule of thumb:
-        #   if timestamps are near 1.7e9, it’s probably seconds-since-epoch
-        #   if near 1.7e12 or 1.7e13, it’s probably milliseconds
-        if max_ts > 1e11:  
-            # Likely milliseconds
-            data['start_timestamp'] = pd.to_datetime(data['start_timestamp'], unit='ms', errors='coerce')
-        else:
-            # Likely seconds
-            data['start_timestamp'] = pd.to_datetime(data['start_timestamp'], unit='s', errors='coerce')
-    else:
-        # Otherwise assume it’s a standard date string
-        data['start_timestamp'] = pd.to_datetime(data['start_timestamp'], errors='coerce')
-    
-    # 3) Use start_timestamp as the DataFrame index
-    data.set_index('start_timestamp', drop=True, inplace=True)
-    
-    # 4) Create the figure
+        raise KeyError("Missing 'start_timestamp' in backtest data.")
+
+    data['start_timestamp'] = pd.to_datetime(data['start_timestamp'], errors='coerce')
+    data.set_index('start_timestamp', inplace=True)
+
+    # 2️⃣ Normalize Strategy Portfolio Value
+    if 'strategy_portfolio_value' not in data.columns:
+        raise KeyError("Missing 'strategy_portfolio_value' in backtest data.")
+
+    strategy_normalized = (data['strategy_portfolio_value'] / data['strategy_portfolio_value'].iloc[0]) * 100
+
+    # 3️⃣ Generate Buy-and-Hold Market Portfolio
+    if 'close' not in data.columns:
+        raise KeyError("Missing 'close' column to build market portfolio baseline.")
+
+    market_portfolio = free_collateral * (data['close'] / data['close'].iloc[0])
+    market_normalized = (market_portfolio / market_portfolio.iloc[0]) * 100
+
+    # 4️⃣ Plotting
     plt.figure(figsize=(14, 7))
+    plt.plot(data.index, strategy_normalized, label='Strategy Portfolio (with fees)', color='blue', linewidth=2)
+    plt.plot(data.index, market_normalized, label='Buy-and-Hold Benchmark', color='orange', linewidth=2)
 
-    # Normalize the portfolio values to start at 100
-    if 'strategy_portfolio_value' in data.columns:
-        first_val = data['strategy_portfolio_value'].iloc[0]
-        strategy_normalized = (data['strategy_portfolio_value'] / first_val) * 100
-        plt.plot(
-            data.index, 
-            strategy_normalized, 
-            label='Strategy Portfolio Value (with fees)', 
-            color='blue', 
-            linewidth=2
-        )
-
-    if 'market_portfolio_value' in data.columns:
-        first_val_mkt = data['market_portfolio_value'].iloc[0]
-        market_normalized = (data['market_portfolio_value'] / first_val_mkt) * 100
-        plt.plot(
-            data.index, 
-            market_normalized, 
-            label='Market Portfolio Value', 
-            color='orange', 
-            linewidth=2
-        )
-
-    # Format the x-axis ticks/labels
+    # Format x-axis dates
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-    plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())  
+    plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())
     plt.xticks(rotation=45)
 
-    # Labels, title, legend, grid
+    # Labels and legends
     plt.title(f'Backtest Results for {pair}', fontsize=16)
     plt.xlabel('Date', fontsize=14)
     plt.ylabel('Normalized Portfolio Value (%)', fontsize=14)
@@ -819,13 +855,27 @@ def plot_backtest_results(data, pair, output_file):
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
 
-    # Save as PNG (adjust as needed)
+    # Save to PNG
     plot_file = output_file.replace('.xlsx', '.png')
     plt.savefig(plot_file)
     plt.close()
 
+
 # Updated run_backtest function with logging
-async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05, initial_investment=10000, take_profit_threshold=0.001, leverage=1, features=None, withdraw_percentage=0.7, compound_percentage=0.3, num_trades=None):
+async def run_backtest(pair
+    , timeframe
+    , token
+    , values
+    , stop_loss_threshold=0.05
+    , free_collateral=10000
+    , take_profit_threshold=0.001
+    , leverage=1
+    , features=None
+    , withdraw_percentage=0.7
+    , compound_percentage=0.3
+    , num_trades=None
+    , market_bias="neutral"):
+
     start = datetime.now()
     logger.info("Starting backtest")
 
@@ -833,7 +883,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
     MODEL_KEY = f'Mockba/trained_models/trained_model_{pair}_{timeframe}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{pair}_{timeframe}_{model_name}.joblib'
-    output_file = f'files/backtest_results_{pair}_{timeframe}_{token}_{model_name}.xlsx'
+    output_file = f'files/backtest_results_{pair}_{timeframe}_{token}_{get_strategy_name(timeframe, features)}.xlsx'
 
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
         # Fetch historical data and add technical indicators
@@ -876,16 +926,16 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
 
         # Calculate market portfolio value (buy-and-hold strategy)
         if 'return' in data.columns:
-            data['market_portfolio_value'] = initial_investment * (1 + data['return'].cumsum())
+            data['market_portfolio_value'] = free_collateral * (1 + data['return'].cumsum())
         else:
-            data['market_portfolio_value'] = initial_investment  # Default to initial investment
+            data['market_portfolio_value'] = free_collateral  # Default to initial investment
 
         # Proceed with backtest using `final_features`
         backtest_result, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy, long_conf, short_conf = await backtest(
               data
             , model
             , used_features
-            , initial_investment
+            , free_collateral
             , stop_loss_threshold
             , take_profit_threshold
             , leverage
@@ -894,6 +944,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
             , num_trades
             , pair
             , timeframe
+            , market_bias
         )
 
         # Calculate key metrics
@@ -902,46 +953,57 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         total_taker_fees = backtest_result['taker_fee_amount'].sum()
         total_stop_loss_amount = backtest_result['stop_loss_amount'].sum()
 
-
-        # Use the last row of the 'cash' column as the final strategy value
-        final_strategy_value = backtest_result['cash'].iloc[-1]
-        total_compounded_profit = final_strategy_value - initial_investment
-        final_percentage_gain_loss = ((final_strategy_value - initial_investment) / initial_investment) * 100
-
         # Identify executed trades and their outcomes
         executed_trades = backtest_result[backtest_result['realized_profit'] != 0]
         winning_trades = executed_trades[executed_trades['realized_profit'] > 0]
         trade_count = len(executed_trades)
         trade_accuracy = len(winning_trades) / trade_count if trade_count > 0 else 0
 
+        # Calculate the final cash value
+        # Use the last row of the 'cash' column as the final cash value
+        # final_cash = backtest_result['cash'].iloc[-1]
+        # Calculate the final cash value
+        final_cash = backtest_result['cash'].iloc[-1]
+        withdrawn_profit = backtest_result['profit_withdrawn'].sum()
+        compounded_profit = backtest_result['compounded_profit'].sum()
+
+        real_strategy_value = final_cash + withdrawn_profit
+
+        effective_gain = real_strategy_value - free_collateral
+        effective_gain_pct = (effective_gain / free_collateral) * 100
+
+
         # Generate result explanation
         result_explanation = (
             f"**Asset Traded:** {pair}\n\n"
             f"**Timeframe:** {timeframe}\n"
             f"**Trading dates:** {values}\n\n"
-            f"**Initial investment:** ${initial_investment:.2f}\n"
-            f"**Final percentage gain/loss:** {final_percentage_gain_loss:.2f}% 💹\n"
-            f"**Total strategy value (capital + compounded):** ${final_strategy_value:.2f}\n"
-            f"**Profit withdrawn:** ${backtest_result['profit_withdrawn'].sum():.2f}  🚀\n"
-            f"**Profit withdrawn percentage:** {withdraw_percentage * 100:.2f}%\n"
-            f"**Compounded profit:** ${total_compounded_profit:.2f}  🚀\n"
-            f"**Compounded profit percentage:** {compound_percentage * 100:.2f}%\n\n"
-            f"**Total funding payments:** ${total_funding_payments:.2f}\n"
-            f"**Total liquidation amount:** ${total_liquidation_amount:.2f}\n"
-            f"**Total stop-loss amount:** ${total_stop_loss_amount:.2f}\n"
-            f"**Total maker fees:** ${total_trading_fees:.2f}\n"
-            f"**Total taker fees:** ${total_taker_fees:.2f}\n"
-            f"**Take Profit threshold:** {take_profit_threshold * 100:.2f}%\n"
-            f"**Stop-loss threshold:** {stop_loss_threshold * 100:.2f}%\n"
-            f"**Leverage used:** {leverage}x\n"
-            f"**Number of trades executed:** {trade_count}\n"
-            f"**Strategy name:** {get_strategy_name(timeframe, features)}\n\n"
-            f"**Used Features:** {used_features}\n"
-            f"🔍 **Avg Prediction Probabilities:** Long: {long_conf:.2f}, Short: {short_conf:.2f}\n"
-            f"🎯 **Trade Accuracy:** {trade_accuracy:.2%} "
+            f"**Initial Investment:** ${free_collateral:.2f}\n"
+            f"📊 **Final Cash (compounded capital):** ${final_cash:.2f}\n"
+            f"💸 **Profit Withdrawn:** ${withdrawn_profit:.2f} ({withdraw_percentage * 100:.0f}%)\n"
+            f"📈 **Total Compounded (reinvested):** ${compounded_profit:.2f} ({compound_percentage * 100:.0f}%)\n"
+            f"💼 **Effective Total Gain (Cash + Withdrawn):** ${real_strategy_value:.2f}  \n"
+            f"(That's a {effective_gain_pct:.2f}% net return 🚀)\n\n"
+
+            f"📉 **Funding Payments:** ${total_funding_payments:.2f}\n"
+            f"🧨 **Liquidation Amount:** ${total_liquidation_amount:.2f}\n"
+            f"🛑 **Stop-Loss Amount:** ${total_stop_loss_amount:.2f}\n"
+            f"💰 **Maker Fees:** ${total_trading_fees:.2f} | **Taker Fees:** ${total_taker_fees:.2f}\n\n"
+
+            f"🎯 **Take Profit Threshold:** {take_profit_threshold * 100:.2f}% | "
+            f"**Stop-Loss Threshold:** {stop_loss_threshold * 100:.2f}% | "
+            f"**Leverage:** {leverage}x\n"
+            f"🔁 **Trades Executed:** {trade_count}\n"
+            f"🧠 **Strategy Used:** {get_strategy_name(timeframe, features)}\n\n"
+
+            f"📊 **Used Features:** {used_features}\n"
+            f"🧠 **Avg Prediction Confidence:** Long: {long_conf:.2f} | Short: {short_conf:.2f}\n"
+            f"✅ **Trade Accuracy:** {trade_accuracy:.2%} "
             f"({len(winning_trades)} winning trades out of {trade_count})\n\n"
-            f"**Execution time:** {datetime.now() - start}"
+            
+            f"⏱️ **Execution Time:** {datetime.now() - start}"
         )
+
         transtaled_result_explanation = translate(result_explanation, token)
         logger.info(transtaled_result_explanation)
         # await send_bot_message(token, result_explanation)
@@ -1011,7 +1073,7 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
         formatted_result[final_columns].to_excel(output_file, index=False)
         
         # Plot using the original numeric data
-        plot_backtest_results(backtest_result, pair, output_file)
+        plot_backtest_results(backtest_result, pair, output_file, free_collateral)
 
         # Delete local model file after upload
         if os.path.exists(local_model_path):
@@ -1032,10 +1094,10 @@ async def run_backtest(pair, timeframe, token, values, stop_loss_threshold=0.05,
 #     token = '556159355'
 #     values = '2025-01-01|2025-01-19'
 #     stop_loss_threshold = 0.5
-#     initial_investment = 100
+#     free_collateral = 100
 #     maker_fee = 0.001
 #     taker_fee = 0.001
 #     take_profit_threshold = 0.01
 #     leverage = 1
 
-#     print(run_backtest(pair, timeframe, token, values, stop_loss_threshold, initial_investment, maker_fee, taker_fee, take_profit_threshold, leverage))
+#     print(run_backtest(pair, timeframe, token, values, stop_loss_threshold, free_collateral, maker_fee, taker_fee, take_profit_threshold, leverage))

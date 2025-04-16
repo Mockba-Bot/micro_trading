@@ -6,7 +6,7 @@ async def execute_backtest(
     token: str,
     values: str,
     stop_loss_threshold: float,
-    initial_investment: float,
+    free_collateral: float,
     maker_fee: float,
     taker_fee: float,
     gain_threshold: float,
@@ -20,7 +20,7 @@ async def execute_backtest(
         token (str): User token for API authentication.
         values (str): Date range for historical data (e.g., "2023-01-01|2023-12-31").
         stop_loss_threshold (float): Stop-loss percentage threshold.
-        initial_investment (float): Initial investment for the backtest.
+        free_collateral (float): Initial investment for the backtest.
         maker_fee (float): Maker fee percentage.
         taker_fee (float): Taker fee percentage.
         gain_threshold (float): Gain percentage threshold.
@@ -35,7 +35,7 @@ async def execute_backtest(
         token,
         values,
         stop_loss_threshold,
-        initial_investment,
+        free_collateral,
         maker_fee,
         taker_fee,
         gain_threshold,

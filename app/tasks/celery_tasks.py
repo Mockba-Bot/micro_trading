@@ -13,7 +13,7 @@ def run_backtest_task(
     , token
     , values
     , stop_loss_threshold=0.05
-    , initial_investment=10000
+    , free_collateral=10000
     , take_profit_threshold=0.001
     , leverage=1
     , features=None
@@ -36,7 +36,7 @@ def run_backtest_task(
             token, 
             values, 
             stop_loss_threshold, 
-            initial_investment, 
+            free_collateral, 
             take_profit_threshold,
             leverage,
             features,

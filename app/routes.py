@@ -11,7 +11,7 @@ class BacktestRequest(BaseModel):
     token: str
     values: str
     stop_loss_threshold: float = 0.05
-    initial_investment: float = 10000
+    free_collateral: float = 10000
     maker_fee: float = 0.001
     taker_fee: float = 0.001
     take_profit_threshold: float = 0.001
@@ -19,7 +19,8 @@ class BacktestRequest(BaseModel):
     features: Optional[List[str]] = None,
     withdraw_percentage: float = 0.7,
     compound_percentage: float = 0.3,
-    num_trades: Optional[int] = None
+    num_trades: Optional[int] = None,
+    market_bias: str = "neutral",
 
 backtest_router = APIRouter()
 status_router = APIRouter()
@@ -36,13 +37,14 @@ async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
             backtest_request.token,
             backtest_request.values,
             backtest_request.stop_loss_threshold,
-            backtest_request.initial_investment,
+            backtest_request.free_collateral,
             backtest_request.take_profit_threshold,
             backtest_request.leverage,
             backtest_request.features,
             backtest_request.withdraw_percentage,
             backtest_request.compound_percentage,
-            backtest_request.num_trades
+            backtest_request.num_trades,
+            backtest_request.market_bias
         )
         return {"task_id": task.id}
     except Exception as e:
