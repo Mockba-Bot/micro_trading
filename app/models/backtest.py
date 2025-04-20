@@ -80,8 +80,8 @@ async def send_bot_message(token, message):
                 response.raise_for_status()
 
 # Fetch historical data from the database
-async def get_historical_data(token, pair, timeframe, values, max_retries=3, retry_delay=5):
-    cache_key = f"historical_data:{pair}:{timeframe}:{values}:{token}"
+async def get_historical_data(token, asset, timeframe, values, max_retries=3, retry_delay=5):
+    cache_key = f"historical_data:{asset}:{timeframe}:{values}:{token}"
     
     # Check if the data exists in Redis
     cached_data = await redis_client.get(cache_key)
@@ -92,7 +92,7 @@ async def get_historical_data(token, pair, timeframe, values, max_retries=3, ret
     
     url = f"{MICRO_CENTRAL_URL}/query-historical-data"
     payload = {
-        "pair": pair,
+        "pair": asset,
         "timeframe": timeframe,
         "values": values
     }
@@ -396,23 +396,25 @@ def get_strategy_name(timeframe, features):
 
 
 async def backtest(
+    asset,
+    timeframe,
     data,
     model,
     features,
     free_collateral=100,
+    position_size=1000,  # Replaces leverage
     stop_loss_threshold=0.02,
     take_profit_threshold=0.005,
-    leverage=5,
     withdraw_percentage=0.7,
     compound_percentage=0.3,
     num_trades=None,
-    asset="PERP_APT_USDC",
-    timeframe="1h",
     market_bias="neutral",  # 'bullish', 'bearish', or 'neutral'
 ):
     """
     Backtests a perpetual futures trading strategy using a trained model.
     """
+    # Calculate leverage based on Orderly-style position sizing
+    leverage = position_size / free_collateral
 
     # Fetch margin ratios for the asset
     symbol = asset  # Construct the symbol (e.g., PERP_BTC_USDC)
@@ -859,36 +861,40 @@ def plot_backtest_results(data, pair, output_file, free_collateral=100):
     plot_file = output_file.replace('.xlsx', '.png')
     plt.savefig(plot_file)
     plt.close()
-
-
+ 
 # Updated run_backtest function with logging
-async def run_backtest(pair
+async def run_backtest(
+      asset
     , timeframe
     , token
     , values
+    , free_collateral=100
+    , position_size=1000  # Replaces leverage
     , stop_loss_threshold=0.05
-    , free_collateral=10000
     , take_profit_threshold=0.001
-    , leverage=1
     , features=None
     , withdraw_percentage=0.7
     , compound_percentage=0.3
     , num_trades=None
     , market_bias="neutral"):
 
+    
+
     start = datetime.now()
     logger.info("Starting backtest")
 
+    leverage = position_size / free_collateral
+
     # Generate dynamic file names
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
-    MODEL_KEY = f'Mockba/trained_models/trained_model_{pair}_{timeframe}_{model_name}.joblib'
-    local_model_path = f'temp/trained_model_{pair}_{timeframe}_{model_name}.joblib'
-    output_file = f'files/backtest_results_{pair}_{timeframe}_{token}_{get_strategy_name(timeframe, features)}.xlsx'
+    MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{timeframe}_{model_name}.joblib'
+    local_model_path = f'temp/trained_model_{asset}_{timeframe}_{model_name}.joblib'
+    output_file = f'files/backtest_results_{asset}_{timeframe}_{token}_{get_strategy_name(timeframe, features)}.xlsx'
 
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
         # Fetch historical data and add technical indicators
         logger.info("Fetching historical data from Orderly")
-        data = await get_historical_data(token, pair, timeframe, values)
+        data = await get_historical_data(token, asset, timeframe, values)
         logger.info("Adding technical indicators")
 
         # Ensure the 'close' column exists
@@ -932,18 +938,18 @@ async def run_backtest(pair
 
         # Proceed with backtest using `final_features`
         backtest_result, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy, long_conf, short_conf = await backtest(
-              data
+              asset
+            , timeframe  
+            , data
             , model
             , used_features
             , free_collateral
+            , position_size
             , stop_loss_threshold
             , take_profit_threshold
-            , leverage
             , withdraw_percentage
             , compound_percentage
             , num_trades
-            , pair
-            , timeframe
             , market_bias
         )
 
@@ -975,7 +981,7 @@ async def run_backtest(pair
 
         # Generate result explanation
         result_explanation = (
-            f"**Asset Traded:** {pair}\n\n"
+            f"**Asset Traded:** {asset}\n\n"
             f"**Timeframe:** {timeframe}\n"
             f"**Trading dates:** {values}\n\n"
             f"**Initial Investment:** ${free_collateral:.2f}\n"
@@ -1006,7 +1012,7 @@ async def run_backtest(pair
 
         transtaled_result_explanation = translate(result_explanation, token)
         logger.info(transtaled_result_explanation)
-        # await send_bot_message(token, result_explanation)
+        await send_bot_message(token, result_explanation)
 
         # Save results to an Excel file with only relevant columns
         logger.info("Saving results to Excel file")
@@ -1073,7 +1079,7 @@ async def run_backtest(pair
         formatted_result[final_columns].to_excel(output_file, index=False)
         
         # Plot using the original numeric data
-        plot_backtest_results(backtest_result, pair, output_file, free_collateral)
+        plot_backtest_results(backtest_result, asset, output_file, free_collateral)
 
         # Delete local model file after upload
         if os.path.exists(local_model_path):
@@ -1084,20 +1090,23 @@ async def run_backtest(pair
         logger.info("Backtest completed")
 
     else:
-        logger.info(f"No model found for {pair}_{timeframe} it must be trained, contact support")
-        await send_bot_message(token, "No model found it must be trained, contact support.")
+        logger.info(f"No model found for {asset}_{timeframe} it must be trained, contact support")
+        translated_message = translate("No model found it must be trained, contact support.", token)
+        await send_bot_message(token, translated_message)
 
 # Example of how to call run_backtest
 # if __name__ == "__main__":
-#     pair = 'PERP_APT_USDC'
-#     timeframe = '1h'
-#     token = '556159355'
-#     values = '2025-01-01|2025-01-19'
-#     stop_loss_threshold = 0.5
-#     free_collateral = 100
-#     maker_fee = 0.001
-#     taker_fee = 0.001
-#     take_profit_threshold = 0.01
-#     leverage = 1
+#     asset= "PERP_APT_USDC",
+#     timeframe= "1h",
+#     token= "556159355",
+#     values= "2025-03-01|2025-03-31",
+#     free_collateral= 100,
+#     position_size= 1000,
+#     stop_loss_threshold= 0.02,
+#     take_profit_threshold= 0.01,
+#     features=  ["close", "high", "low", "volume", "ema_20", "ema_50", "macd", "macd_signal", "adx", "vwap"],
+#     withdraw_percentage= 0.4,
+#     compound_percentage= 0.6,
+#     market_bias= "normal"
 
-#     print(run_backtest(pair, timeframe, token, values, stop_loss_threshold, free_collateral, maker_fee, taker_fee, take_profit_threshold, leverage))
+#     print(run_backtest(asset, timeframe, token, values, free_collateral, position_size, stop_loss_threshold, take_profit_threshold, features, withdraw_percentage, compound_percentage, market_bias))
