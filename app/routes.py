@@ -17,7 +17,7 @@ class BacktestRequest(BaseModel):
     features: Optional[List[str]] = None
     withdraw_percentage: float = 0.7
     compound_percentage: float = 0.3
-    num_trades: Optional[int] = None
+    num_trades_daily: Optional[int] = None
     market_bias: str
 
 class AnalyzeIntervalsRequest(BaseModel):
@@ -46,7 +46,7 @@ async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
             backtest_request.features,
             backtest_request.withdraw_percentage,
             backtest_request.compound_percentage,
-            backtest_request.num_trades,
+            backtest_request.num_trades_daily,
             backtest_request.market_bias
         )
         return {"task_id": task.id}

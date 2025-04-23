@@ -20,7 +20,7 @@ def run_backtest_task(
     , features=None
     , withdraw_percentage=0.7
     , compound_percentage=0.3
-    , num_trades=None
+    , num_trades_daily=None
     , market_bias="neutral"
     ):
     
@@ -45,7 +45,7 @@ def run_backtest_task(
             features,
             withdraw_percentage,
             compound_percentage,
-            num_trades,
+            num_trades_daily,
             market_bias
         )
     )

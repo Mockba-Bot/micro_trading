@@ -14,6 +14,7 @@ import redis.asyncio as redis
 import logging
 from collections import Counter
 from app.models.bucket import download_model
+import json
 from deep_translator import GoogleTranslator
 
 # Add the directory containing your modules to the Python path
@@ -324,22 +325,47 @@ def add_indicators(data, required_features):
 
     return data
 
-def fetch_margin_ratios(symbol):
+async def fetch_asset_info(symbol):
     """
-    Fetch Base MMR, Base IMR, and IMR Factor for a given symbol from Orderly API.
+    Fetch asset info from Orderly API including margin and liquidation parameters.
+    Cache the result in Redis for 30 days.
     """
+    cache_key = f"asset_info:{symbol}"
+    ttl_30_days = 30 * 24 * 60 * 60  # 30 days in seconds
+
+    # Check if the data exists in Redis
+    if redis_client:
+        cached_data = await redis_client.get(cache_key)
+        if cached_data:
+            print(f"Cache hit for {symbol}")
+            return json.loads(cached_data)  # Return cached data
+
+    # Fetch data from the API
     url = f"https://api-evm.orderly.org/v1/public/info/{symbol}"
     response = requests.get(url)
-    
+
     if response.status_code == 200:
         data = response.json().get("data", {})
-        return {
-            "base_mmr": data.get("base_mmr", 0.05),  # Default to 0.05 if not found
-            "base_imr": data.get("base_imr", 0.1),   # Default to 0.1 if not found
-            "imr_factor": data.get("imr_factor", 0.00000208),  # Default to 0.00000208 if not found
+        asset_info = {
+            "base_mmr": data.get("base_mmr", 0.05),
+            "base_imr": data.get("base_imr", 0.1),
+            "imr_factor": data.get("imr_factor", 0.00000208),
+            "funding_period": data.get("funding_period", 8),
+            "cap_funding": data.get("cap_funding", 0.0075),
+            "std_liquidation_fee": data.get("std_liquidation_fee", 0.024),
+            "liquidator_fee": data.get("liquidator_fee", 0.012),
+            "min_notional": data.get("min_notional", 10),
+            "quote_max": data.get("quote_max", 100000),
         }
+
+        # Store the data in Redis for 30 days
+        if redis_client:
+            await redis_client.setex(cache_key, ttl_30_days, json.dumps(asset_info))
+
+        return asset_info
     else:
-        raise Exception(f"Failed to fetch data for {symbol}. Status code: {response.status_code}")
+        raise Exception(f"Failed to fetch asset info for {symbol} - Status code: {response.status_code}")
+
 
 
 def get_strategy_name(timeframe, features):
@@ -396,6 +422,7 @@ def get_strategy_name(timeframe, features):
 
 
 async def backtest(
+    token,
     asset,
     timeframe,
     data,
@@ -407,21 +434,58 @@ async def backtest(
     take_profit_threshold=0.005,
     withdraw_percentage=0.7,
     compound_percentage=0.3,
-    num_trades=None,
+    num_trades_daily=None,
     market_bias="neutral",  # 'bullish', 'bearish', or 'neutral'
 ):
+    # Initialize daily trade tracking if num_trades_daily is set
+    if num_trades_daily:
+        today = datetime.now().strftime('%Y-%m-%d')
+        trade_count_key = f"backtest:{token}:{asset}:{today}:trade_count"
+        last_trade_date_key = f"backtest:{token}:{asset}:last_trade_date"
+        
+        # Check if we're on a new day
+        last_trade_date = await redis_client.get(last_trade_date_key)
+        if last_trade_date and last_trade_date.decode() != today:
+            await redis_client.delete(trade_count_key)  # Reset counter for new day
+            
+        # Get current trade count
+        current_count = await redis_client.get(trade_count_key)
+        current_count = int(current_count.decode()) if current_count else 0
     """
     Backtests a perpetual futures trading strategy using a trained model.
     """
     # Calculate leverage based on Orderly-style position sizing
     leverage = position_size / free_collateral
 
-    # Fetch margin ratios for the asset
-    symbol = asset  # Construct the symbol (e.g., PERP_BTC_USDC)
-    margin_ratios = fetch_margin_ratios(symbol)
-    base_mmr = margin_ratios["base_mmr"]
-    base_imr = margin_ratios["base_imr"]
-    imr_factor = margin_ratios["imr_factor"]
+    # Fetch asset info
+    symbol = asset
+    asset_info = fetch_asset_info(symbol)
+
+    base_mmr = asset_info["base_mmr"]
+    base_imr = asset_info["base_imr"]
+    imr_factor = asset_info["imr_factor"]
+    funding_period = asset_info["funding_period"]
+    cap_funding = asset_info["cap_funding"]
+    std_liquidation_fee = asset_info["std_liquidation_fee"]
+    liquidator_fee = asset_info["liquidator_fee"]
+    min_notional = asset_info["min_notional"]
+    quote_max = asset_info["quote_max"]
+
+    # Validate investment size
+    if position_size < min_notional or position_size > quote_max:
+        raise ValueError(f"Position size {position_size} must be between min_notional ({min_notional}) and quote_max ({quote_max})")
+    
+    # Funding is annualized — convert cap_funding to per-interval rate
+    interval_minutes = {
+        "5m": 5,
+        "1h": 60,
+        "4h": 240,
+        "1d": 1440
+    }
+    minutes_per_year = 525600
+    interval = interval_minutes.get(timeframe, 60)
+    funding_rate = (cap_funding * interval) / minutes_per_year
+
 
     # If 'start_timestamp' is not in columns, create it from the index
     if 'start_timestamp' not in data.columns:
@@ -531,14 +595,6 @@ async def backtest(
     last_funding_time = 0  
     trade_count = 0  # Track the number of trades
 
-    # --- 2️⃣ Get Fees and Rates ---
-    funding_rate_map = {
-        "5m": 0.0001,  # 0.01% per 5 minutes
-        "1h": 0.0005,  # 0.05% per hour
-        "4h": 0.001,   # 0.1% per 4 hours
-        "1d": 0.002,   # 0.2% per day
-    }
-    funding_rate = funding_rate_map[timeframe]
 
     # --- 3️⃣ Calculate Bars Between Funding Fees ---
     timeframe_to_bars = {
@@ -549,38 +605,12 @@ async def backtest(
     }
     bars_between_funding = timeframe_to_bars[timeframe]
 
-    # --- 4️⃣ Define Liquidation Fees ---
-    def get_liquidation_fees(asset, leverage):
-        """
-        Calculate liquidation fees based on the asset and leverage.
-        Returns:
-            user_liquidation_fee (float): Fee charged to the user for liquidation.
-            liquidator_fee (float): Fee paid to the liquidator.
-        """
-        # High Tier Liquidation Fees
-        if asset.split("_")[1] in ["BTC", "ETH"]:
-            user_liquidation_fee = 0.008  # 0.80%
-            liquidator_fee = 0.004  # 0.40%
-        else:
-            # Low Tier Liquidation Fees for Altcoins
-            if leverage == 10:
-                user_liquidation_fee = 0.015  # 1.50%
-                liquidator_fee = 0.0075  # 0.75%
-            elif leverage == 20:
-                user_liquidation_fee = 0.024  # 2.40%
-                liquidator_fee = 0.012  # 1.20%
-            else:
-                user_liquidation_fee = 0.015  # Default for other leverage levels
-                liquidator_fee = 0.0075  # Default for other leverage levels
-
-        return user_liquidation_fee, liquidator_fee
-
     # --- 5️⃣ Define Margin Ratios ---
-    def get_margin_ratios(position_notional):
+    # Function to calculate IMR and MMR
+    def calculate_margin_ratios(position_notional, leverage, base_imr, base_mmr, imr_factor):
         """
         Calculate Initial Margin Ratio (IMR) and Maintenance Margin Ratio (MMR).
         """
-        # Calculate IMR and MMR using fetched values
         imr = max(1 / leverage, base_imr, imr_factor * abs(position_notional) ** (4 / 5))
         mmr = max(base_mmr, base_mmr / base_imr * imr_factor * abs(position_notional) ** (4 / 5))
         return imr, mmr
@@ -591,7 +621,7 @@ async def backtest(
 
     # --- 6️⃣ Iterate Over Data ---
     for i in range(1, len(data)):
-        if num_trades is not None and trade_count >= num_trades:
+        if num_trades_daily is not None and trade_count >= num_trades_daily:
             print(f"Trade limit reached. Stopping at trade {trade_count}")
             break  # Stop if the number of trades reaches the limit
 
@@ -757,6 +787,16 @@ async def backtest(
         # --- 💥 Liquidation Check ---
         if position_open:
             # 1) Notional value of the current position
+            # Check daily trade limit if set
+            if num_trades_daily:
+                if current_count >= num_trades_daily:
+                    continue  # Skip trade if daily limit reached
+                
+                # Increment trade count
+                await redis_client.incr(trade_count_key)
+                await redis_client.set(last_trade_date_key, today)
+                current_count += 1
+
             notional = data['position_size'].iloc[i] * data['close'].iloc[i]
 
             # 2) PnL if the position were closed now
@@ -769,7 +809,7 @@ async def backtest(
             account_margin_ratio = total_collateral_value / abs(notional)
 
             # 4) Maintenance Margin Ratio (MMR)
-            _, mmr = get_margin_ratios(notional)
+            imr, mmr = calculate_margin_ratios(notional, leverage, base_imr, base_mmr, imr_factor)
 
             # 5) Liquidation threshold (info only)
             liquidation_threshold = total_collateral_value - (mmr * abs(notional))
@@ -785,9 +825,9 @@ async def backtest(
             # 6) Liquidation Trigger
             if account_margin_ratio < mmr:
                 # Apply liquidation
-                liquidation_fee, liquidator_fee = get_liquidation_fees(asset, leverage)
-                user_fee = liquidation_fee * abs(notional)
+                user_fee = std_liquidation_fee * abs(notional)
                 liquidator_reward = liquidator_fee * abs(notional)
+
 
                 data['liquidation'].iloc[i] = 1
                 total_liquidation_amount += total_collateral_value
@@ -875,7 +915,7 @@ async def run_backtest(
     , features=None
     , withdraw_percentage=0.7
     , compound_percentage=0.3
-    , num_trades=None
+    , num_trades_daily=None
     , market_bias="neutral"):
 
     
@@ -938,7 +978,8 @@ async def run_backtest(
 
         # Proceed with backtest using `final_features`
         backtest_result, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy, long_conf, short_conf = await backtest(
-              asset
+              token
+            , asset
             , timeframe  
             , data
             , model
@@ -949,7 +990,7 @@ async def run_backtest(
             , take_profit_threshold
             , withdraw_percentage
             , compound_percentage
-            , num_trades
+            , num_trades_daily
             , market_bias
         )
 
