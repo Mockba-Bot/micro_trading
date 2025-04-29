@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from celery.result import AsyncResult
 from app.tasks.celery_app import celery_app
-from app.tasks.celery_tasks import run_backtest_task, analyze_intervals_task
+from app.tasks.celery_tasks import run_backtest_task, analyze_intervals_task, analyze_asset_task
 from typing import List, Optional
 
 class BacktestRequest(BaseModel):
@@ -24,9 +24,16 @@ class AnalyzeIntervalsRequest(BaseModel):
     asset: str
     token: str 
 
+class AnalyzeAssetRequest(BaseModel):
+    token: str
+    asset: str
+    timeframe: str
+    features: Optional[List[str]] = None    
+
 backtest_router = APIRouter()
 status_router = APIRouter()
 analyze_router = APIRouter()
+analyze_asset_router = APIRouter()
 
 @backtest_router.post("/backtest")
 async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
@@ -65,6 +72,7 @@ async def get_task_status(task_id: str):
     else:
         return {"status": task_result.state}
     
+
 @analyze_router.post("/elliot_waves/analyze_intervals")
 async def analyze_intervals_api(request: Request, analyze_request: AnalyzeIntervalsRequest):
     """
@@ -77,4 +85,21 @@ async def analyze_intervals_api(request: Request, analyze_request: AnalyzeInterv
         )
         return {"task_id": task.id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))    
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@analyze_asset_router.post("/analyze_asset")
+async def analyze_asset_api(request: Request, analyze_asset_request: AnalyzeAssetRequest):
+    """
+    Analyze the asset with the given parameters.
+    """
+    try:
+        task = analyze_asset_task.delay(
+            analyze_asset_request.token,
+            analyze_asset_request.asset,
+            analyze_asset_request.timeframe,
+            analyze_asset_request.features
+        )
+        return {"task_id": task.id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))        

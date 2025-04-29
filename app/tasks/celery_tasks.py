@@ -2,7 +2,7 @@ import asyncio
 from celery import shared_task
 from app.models.backtest import run_backtest
 from app.models.elliot_waves import analyze_intervals
-from app.utils.live_trade import trader
+from app.models.technical_analisys import analize_asset
 import logging
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,35 @@ def analyze_intervals_task(
         )
     )
     return result
+
+@shared_task(queue="trading")
+def analyze_asset_task(
+    token,
+    asset,
+    interval,
+    features=None
+):
+    
+    logger.info(f"Analyzing asset {asset} with token {token} and timeframe {interval}")
+    
+    # ✅ Fix: Use `asyncio.get_event_loop()` instead of `asyncio.run()`
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    result = loop.run_until_complete(
+        analize_asset(
+            token,
+            asset,
+            interval,
+            features
+        )
+    )
+    
+    return result
+
+
 
 @shared_task(queue="trading")
 def run_trader():
