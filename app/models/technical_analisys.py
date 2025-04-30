@@ -8,7 +8,7 @@ import numpy as np
 import urllib.parse
 from dotenv import load_dotenv
 import joblib  # Library for model serialization
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import redis.asyncio as redis
 import logging
@@ -211,55 +211,6 @@ def fetch_historical_orderly(symbol, interval):
         return df
     return None
 
-# Fetch historical data from the database
-async def get_historical_data(token, asset, timeframe, values, max_retries=3, retry_delay=5):
-    cache_key = f"historical_data:{asset}:{timeframe}:{values}:{token}"
-    
-    # Check if the data exists in Redis
-    cached_data = await redis_client.get(cache_key)
-    if cached_data:
-        print("cached_data for historical_data")
-        data = pd.read_json(cached_data.decode('utf-8'))  # Decode bytes to string
-        return data
-    
-    url = f"{MICRO_CENTRAL_URL}/query-historical-data"
-    payload = {
-        "pair": asset,
-        "timeframe": timeframe,
-        "values": values
-    }
-    headers = {
-        "Token": token
-    }
-
-    for attempt in range(max_retries):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        df = pd.DataFrame(data)
-                        
-                        # Convert columns to numeric types
-                        df['close'] = pd.to_numeric(df['close'])
-                        df['high'] = pd.to_numeric(df['high'])
-                        df['low'] = pd.to_numeric(df['low'])
-                        df['volume'] = pd.to_numeric(df['volume'])
-                        
-                        # Store the data in Redis for 20 minutes (1200 seconds)
-                        await redis_client.setex(cache_key, 1200, df.to_json())
-                        
-                        return df
-                    else:
-                        logger.error(f"Error fetching historical data: {response.status} {await response.text()}")
-                        response.raise_for_status()
-        except Exception as e:
-            logger.error(f"Attempt {attempt + 1} failed: {e}")
-            if attempt < max_retries - 1:
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                raise e
 
 # Add technical indicators to the data
 def add_indicators(data, required_features):
@@ -551,6 +502,39 @@ def get_strategy_name(timeframe, features):
     return None
 
 
+def format_analysis_for_telegram(cached_data):
+    """
+    Safely decodes Redis-cached data and fixes unicode emojis for Telegram.
+    """
+    if not cached_data:
+        return None
+
+    try:
+        # Decode Redis bytes to UTF-8 string (don't touch encoding further!)
+        decoded_str = cached_data.decode('utf-8')
+
+        # Parse JSON if necessary
+        try:
+            parsed = json.loads(decoded_str)
+        except json.JSONDecodeError:
+            parsed = decoded_str
+
+        # If parsed is still escaped Unicode (e.g., \\ud83d), decode it
+        if isinstance(parsed, str) and '\\u' in parsed:
+            parsed = bytes(parsed, 'utf-8').decode('unicode_escape')
+
+        return parsed
+
+    except Exception as e:
+        print(f"Error formatting cached data: {e}")
+        return None
+
+    except Exception as e:
+        print(f"Error formatting cached data: {e}")
+        return None
+
+
+
 async def analize_asset(token, asset, interval, features, market_bias='neutral'):
     print('Getting data for analysis') 
 
@@ -558,6 +542,17 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
+    
+    cache_key = f"analisys:{asset}:{interval}:{features}"
+    
+    cached_data = await redis_client.get(cache_key)
+    if cached_data:
+        print("Returning cached analysis")
+        formatted_text = format_analysis_for_telegram(cached_data)
+        translated_text = translate(formatted_text, token)
+        await send_bot_message(token, translated_text)
+        return
+        
 
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
         data = fetch_historical_orderly(asset, interval)
@@ -679,7 +674,7 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
         prompt = f"""
         **Task:** Generate a professional trading analysis for {asset} {interval} with clear verdict and recommendations, also Generate exactly 2 trade setups (1 long, 1 short) with clear triggers and fixed risk parameters, optimized for Telegram.
 
-        ### **Raw Data to Analyze:**
+        ###Raw Data to Analyze:
         1. PRICE/INDICATORS (Last 100 rows):
         {data_json} 
 
@@ -695,47 +690,51 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
         5. ORDER BOOK SNAPSHOT:
         {order_book_snapshot_json}
 
-        ### **Strict Output Rules:**
-        ```markdown
-        **📊 {asset} {interval}, {get_strategy_name(interval, features)} TA Report**
+        Strict Output Rules:
+        📊 {asset} {interval}, {get_strategy_name(interval, features)} TA Report
 
-        **Explanation**
-        - [3-5 sentences explaining the analysis]
-        **📉 Price Action**
+        Explanation
+        - [2-3 sentences explaining the analysis]
+        📉 Price Action
 
-        **📈 Trend**
+        📈 [Trend]
         ➖/➕ [EMA20 vs EMA50] + [ADX <25?>]
         🔸 [VWAP relation] + [MACD direction]
 
-        **📊 Volume**
+        📊 [Volume]
         ➖/➕ [Volume trend] + [Volume spikes]
 
-        **🎯 Key Zones** 
+        🎯 [Key Zones]
         ▪️ Support: [strongest 2 levels]
         ▪️ Resistance: [strongest 2 levels]
 
-        **🤖 ML Signals** 
+        🤖 [ML Signals]
         🔹 Recent: [last 3 predictions] 
         🔸 Now: [current prediction] @ [price]
 
-        **💧 Liquidity**
+        💧 [Liquidity]
         🛡️ Asks: [size] @ [price] 
         🛡️ Bids: [size] @ [price]
 
-        **💰 Asset Info**
+        💰 [Asset Info]
         ▪️ Std Liquidation Fee: [value]
         ▪️ Liquidator Fee: [value]
         ▪️ Min Notional: [value]
         ▪️ Quote Max: [value]
 
-        **⚡ Setups**
+        ⚡ [Setups]
         2) [Trigger] → TP:[target] SL:[stop]
         3) [Trigger] → TP:[target] SL:[stop]
 
-        **📌 Verdict and Summary**
+        📌 [Verdict and Summary]
         ▪️ [1-sentence bias]
         ⚠️ [Key risk] 
         ⌚ Next check: [time/condition] 
+
+        Rules:
+        1. No markdown (**, `, ###, etc)
+        2. Use simple dashes (-) for bullets
+        3. Keep decimals consistent (2 places)
         """
 
 
@@ -765,11 +764,17 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
         if response.status_code == 200:
             analysis = response.json()["choices"][0]["message"]["content"]
             analysis_translated = translate(analysis, token)
-            send_bot_message(token, analysis_translated)
-            print(analysis_translated)
+
+            # Store result in Redis with 30-minute expiration
+            await redis_client.setex(cache_key,
+                timedelta(minutes=45),
+                json.dumps(analysis))
+
+            await send_bot_message(token, analysis_translated)
+            # print(analysis_translated)
         else:
             print(f"Error: {response.status_code}, {response.text}")
-
+      
         # Delete local model file after upload
         if os.path.exists(local_model_path):
            os.remove(local_model_path)
