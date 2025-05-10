@@ -537,11 +537,12 @@ def format_analysis_for_telegram(cached_data):
 
 async def analize_asset(token, asset, interval, features, market_bias='neutral'):
     print('Getting data for analysis') 
-
+    analysis_translated = None
     # Generate dynamic file names
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
+    
     
     cache_key = f"analisys:{asset}:{interval}:{features}"
     
@@ -749,7 +750,7 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a trading analyst. Generate concise, data-driven technical reports in markdown."
+                        "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals."
                     },
                     {
                         "role": "user",
@@ -765,9 +766,9 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
             analysis = response.json()["choices"][0]["message"]["content"]
             analysis_translated = translate(analysis, token)
 
-            # Store result in Redis with 30-minute expiration
+            # Store result in Redis with 20-minute expiration
             await redis_client.setex(cache_key,
-                timedelta(minutes=45),
+                timedelta(minutes=20),
                 json.dumps(analysis))
 
             await send_bot_message(token, analysis_translated)
@@ -780,4 +781,6 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
            os.remove(local_model_path)
         else:
            print(f"Local file {local_model_path} does not exist.")
+
+    return analysis_translated       
     

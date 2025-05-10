@@ -437,20 +437,7 @@ async def backtest(
     num_trades_daily=None,
     market_bias="neutral",  # 'bullish', 'bearish', or 'neutral'
 ):
-    # Initialize daily trade tracking if num_trades_daily is set
-    if num_trades_daily:
-        today = datetime.now().strftime('%Y-%m-%d')
-        trade_count_key = f"backtest:{token}:{asset}:{today}:trade_count"
-        last_trade_date_key = f"backtest:{token}:{asset}:last_trade_date"
-        
-        # Check if we're on a new day
-        last_trade_date = await redis_client.get(last_trade_date_key)
-        if last_trade_date and last_trade_date.decode() != today:
-            await redis_client.delete(trade_count_key)  # Reset counter for new day
-            
-        # Get current trade count
-        current_count = await redis_client.get(trade_count_key)
-        current_count = int(current_count.decode()) if current_count else 0
+
     """
     Backtests a perpetual futures trading strategy using a trained model.
     """
@@ -459,7 +446,7 @@ async def backtest(
 
     # Fetch asset info
     symbol = asset
-    asset_info = fetch_asset_info(symbol)
+    asset_info = await fetch_asset_info(symbol)
 
     base_mmr = asset_info["base_mmr"]
     base_imr = asset_info["base_imr"]
@@ -621,9 +608,21 @@ async def backtest(
 
     # --- 6️⃣ Iterate Over Data ---
     for i in range(1, len(data)):
-        if num_trades_daily is not None and trade_count >= num_trades_daily:
-            print(f"Trade limit reached. Stopping at trade {trade_count}")
-            break  # Stop if the number of trades reaches the limit
+        today = data['start_timestamp'].iloc[i].strftime('%Y-%m-%d')
+        trade_count_key = f"backtest:{token}:{asset}:{today}:trade_count"
+        last_trade_date_key = f"backtest:{token}:{asset}:last_trade_date"
+
+        last_trade_date = await redis_client.get(last_trade_date_key)
+        last_trade_date = last_trade_date.decode() if last_trade_date else None
+
+        if last_trade_date != today:
+            await redis_client.set(last_trade_date_key, today)
+            await redis_client.set(trade_count_key, 0)
+            current_count = 0
+        else:
+            current_count = await redis_client.get(trade_count_key)
+            current_count = int(current_count.decode()) if current_count else 0
+
 
         funding_payment = 0
 
@@ -637,6 +636,9 @@ async def backtest(
         # --- Trade Execution Logic ---
         if data['predicted'].iloc[i - 1] == 1:  # Long signal
             if not position_open:
+                if num_trades_daily and current_count >= num_trades_daily:
+                     continue  # Skip this signal today
+
                 executed_longs += 1
                 # Calculate position size and trading fees (maker fee for opening)
                 position_size = (data['cash'].iloc[i - 1] * leverage / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
@@ -654,6 +656,8 @@ async def backtest(
                 position_open = True
                 last_position_price = data['close'].iloc[i]
                 trade_count += 1  # Increment trade count
+                await redis_client.incr(trade_count_key)
+
             else:
                 # If position is already open, carry forward the previous values
                 data['position'].iloc[i] = data['position'].iloc[i - 1]
@@ -661,9 +665,12 @@ async def backtest(
                 data['margin_used'].iloc[i] = data['margin_used'].iloc[i - 1]
                 data['trading_fees'].iloc[i] = 0  # No new fee for holding the position
                 data['cash'].iloc[i] = data['cash'].iloc[i - 1]  # Carry forward cash balance
+            
 
         elif data['predicted'].iloc[i - 1] == -1:  # Short signal
             if not position_open:
+                if num_trades_daily and current_count >= num_trades_daily:
+                     continue  # Skip this signal today
                 executed_shorts += 1
                 # Calculate position size and trading fees (maker fee for opening)
                 position_size = (data['cash'].iloc[i - 1] * leverage / data['close'].iloc[i]) * (1 - MAKER_FEE * leverage)
@@ -681,6 +688,7 @@ async def backtest(
                 position_open = True
                 last_position_price = data['close'].iloc[i]
                 trade_count += 1  # Increment trade count
+                await redis_client.incr(trade_count_key)
             else:
                 # If position is already open, carry forward the previous values
                 data['position'].iloc[i] = data['position'].iloc[i - 1]
@@ -688,6 +696,7 @@ async def backtest(
                 data['margin_used'].iloc[i] = data['margin_used'].iloc[i - 1]
                 data['trading_fees'].iloc[i] = 0  # No new fee for holding the position
                 data['cash'].iloc[i] = data['cash'].iloc[i - 1]  # Carry forward cash balance
+   
 
         elif data['predicted'].iloc[i - 1] == 0 and position_open:  # Close position
                 # 1) Compute PnL
@@ -728,11 +737,15 @@ async def backtest(
                 data['position_size'].iloc[i] = 0
                 data['margin_used'].iloc[i] = 0
                 position_open = False
+                await redis_client.incr(trade_count_key)
                 trade_count += 1  # Increment trade count
 
         else:
             # If no trade is executed, carry forward the previous cash balance
-            data['cash'].iloc[i] = data['cash'].iloc[i - 1]    
+            data['cash'].iloc[i] = data['cash'].iloc[i - 1]  
+
+            if current_count >= num_trades_daily:
+                continue  # Skip this signal today   
 
         # --- Portfolio Value Calculation ---
         if position_open:
@@ -794,7 +807,6 @@ async def backtest(
                 
                 # Increment trade count
                 await redis_client.incr(trade_count_key)
-                await redis_client.set(last_trade_date_key, today)
                 current_count += 1
 
             notional = data['position_size'].iloc[i] * data['close'].iloc[i]
@@ -847,7 +859,7 @@ async def backtest(
                     print(f"💥 Account fully liquidated on {data['start_timestamp'].iloc[i]}")
                     break
 
-
+    trade_count = int(await redis_client.get(trade_count_key) or 0)
     trade_accuracy = winning_trades / trade_count if trade_count else 0
 
     return data, total_liquidation_amount, trade_count, signal_distribution, trade_accuracy, long_conf, short_conf

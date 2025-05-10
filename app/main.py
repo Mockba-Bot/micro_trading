@@ -23,8 +23,7 @@ app.include_router(analyze_asset_router, prefix="/api/v1/trading")
 # alembic upgrade head
 # Run project
 # uvicorn app.main:app --port 8001 --reload 
-# redis-cli -p 6390
-# redis-cli flushdb
-# redis-cli flushall
+# redis-cli -p 6390 FLUSHDB
+# redis-cli -p 6390 flushall
 # celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=2 --queues=trading
 # celery -A app.tasks.celery_app.celery_app beat --loglevel=info

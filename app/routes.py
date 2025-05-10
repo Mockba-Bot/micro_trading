@@ -23,6 +23,7 @@ class BacktestRequest(BaseModel):
 class AnalyzeIntervalsRequest(BaseModel):
     asset: str
     token: str 
+    interval : str
 
 class AnalyzeAssetRequest(BaseModel):
     token: str
@@ -81,7 +82,8 @@ async def analyze_intervals_api(request: Request, analyze_request: AnalyzeInterv
     try:
         task = analyze_intervals_task.delay(
             analyze_request.asset,
-            analyze_request.token
+            analyze_request.token,
+            analyze_request.interval
         )
         return {"task_id": task.id}
     except Exception as e:

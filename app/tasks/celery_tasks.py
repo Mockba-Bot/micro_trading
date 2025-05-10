@@ -55,10 +55,11 @@ def run_backtest_task(
 @shared_task(queue="trading")
 def analyze_intervals_task(
     asset,
-    token
+    token,
+    interval
 ):
     
-    logger.info(f"Analyzing intervals for {asset} with token {token}")
+    logger.info(f"Analyzing intervals for {asset} with token {token} and interval {interval}")
     
     # ✅ Fix: Use `asyncio.get_event_loop()` instead of `asyncio.run()`
     loop = asyncio.get_event_loop()
@@ -69,7 +70,8 @@ def analyze_intervals_task(
     result = loop.run_until_complete(
         analyze_intervals(
             asset,
-            token
+            token,
+            interval
         )
     )
     return result

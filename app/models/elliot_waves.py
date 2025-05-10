@@ -5,7 +5,10 @@ import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 import mplfinance as mpf
 import time
+import urllib.parse
 from dotenv import load_dotenv
+from base58 import b58decode
+from base64 import urlsafe_b64encode
 import os
 import joblib
 from app.models.bucket import download_model
@@ -15,8 +18,11 @@ import aiohttp
 import redis.asyncio as redis
 import logging
 from datetime import datetime, timedelta, timezone
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sklearn.preprocessing import MinMaxScaler
+import threading
 import telebot
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +37,14 @@ MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")  # Your micro central URL
 API_TOKEN = os.getenv("API_TOKEN")
 bot = telebot.TeleBot(API_TOKEN)
 
+# ✅ Orderly API Config
+BASE_URL = os.getenv("ORDERLY_BASE_URL")
+ORDERLY_ACCOUNT_ID = os.getenv("ORDERLY_ACCOUNT_ID")
+ORDERLY_SECRET = os.getenv("ORDERLY_SECRET")
+ORDERLY_PUBLIC_KEY = os.getenv("ORDERLY_PUBLIC_KEY")
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", 10))
+DEEP_SEEK_API_KEY = os.getenv("DEEP_SEEK_API_KEY")
+
 # Initialize Redis connection
 try:
     redis_client = redis.from_url(os.getenv("REDIS_URL"))
@@ -38,6 +52,35 @@ try:
 except redis.ConnectionError as e:
     print(f"Redis connection error: {e}")
     redis_client = None
+
+
+if not ORDERLY_SECRET or not ORDERLY_PUBLIC_KEY:
+    raise ValueError("❌ ORDERLY_SECRET or ORDERLY_PUBLIC_KEY environment variables are not set!")
+
+# ✅ Remove "ed25519:" prefix if present in private key
+if ORDERLY_SECRET.startswith("ed25519:"):
+    ORDERLY_SECRET = ORDERLY_SECRET.replace("ed25519:", "")
+
+# ✅ Decode Base58 Private Key
+private_key = Ed25519PrivateKey.from_private_bytes(b58decode(ORDERLY_SECRET))
+
+# ✅ Rate limiter (Ensures max 8 API requests per second globally)
+class RateLimiter:
+    def __init__(self, max_calls, period):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = []
+        self.lock = threading.Lock()
+
+    def __call__(self):
+        with self.lock:
+            now = time.time()
+            self.calls = [call for call in self.calls if call > now - self.period]
+            if len(self.calls) >= self.max_calls:
+                sleep_time = self.period - (now - self.calls[0])
+                print(f"⏳ Rate limit reached! Sleeping for {sleep_time:.2f} seconds...")
+                time.sleep(sleep_time)
+            self.calls.append(time.time())    
 
 # Translate function to convert text to the target language
 def translate(text, token):
@@ -140,6 +183,48 @@ async def fetch_crypto_data(asset, interval, token, max_retries=5, retry_delay=5
             else:
                 raise e
 
+
+# ✅ Fetch historical Orderly data with global rate limiting
+rate_limiter = RateLimiter(max_calls=10, period=1)
+def fetch_historical_orderly(symbol, interval):
+    rate_limiter()  # ✅ Apply global rate limit
+
+    timestamp = str(int(time.time() * 1000))
+    params = {"symbol": symbol, "type": interval, "limit": 1000}
+    path = "/v1/kline"
+    query = f"?{urllib.parse.urlencode(params)}"
+    message = f"{timestamp}GET{path}{query}"
+    signature = urlsafe_b64encode(private_key.sign(message.encode())).decode()
+
+    headers = {
+        "orderly-timestamp": timestamp,
+        "orderly-account-id": ORDERLY_ACCOUNT_ID,
+        "orderly-key": ORDERLY_PUBLIC_KEY,
+        "orderly-signature": signature,
+    }
+
+    url = f"{BASE_URL}{path}{query}"
+    response = requests.get(url, headers=headers)
+
+    if response.status_code != 200:
+        print(f"❌ Error fetching data for {symbol} {interval}: {response.json()}")
+        return None
+
+    data = response.json().get("data", {})
+    if not data or "rows" not in data:
+        return None
+
+    df = pd.DataFrame(data["rows"])
+    required_columns = ["start_timestamp", "open", "high", "low", "close", "volume"]
+    if set(required_columns).issubset(df.columns):
+        df['start_timestamp'] = pd.to_datetime(df['start_timestamp'], unit='ms')
+        df.set_index('start_timestamp', inplace=True)
+        df = df[["open", "high", "low", "close", "volume"]]
+        df = df[~df.index.duplicated(keep='first')]  # Remove duplicates
+        return df
+    return None
+
+
 # Function to create dataset suitable for XGBRegressor
 def create_rf_dataset(dataset, look_back=1):
     X, Y = [], []
@@ -148,237 +233,203 @@ def create_rf_dataset(dataset, look_back=1):
         Y.append(dataset[i + look_back])
     return np.array(X), np.array(Y)
 
-# Function to analyze market trend based on Elliott Waves
-def analyze_market_trend(predicted_labels, data):
-    # Ensure the timestamp is in datetime format and set as index
-    if 'start_timestamp' in data.columns:
-        data['start_timestamp'] = pd.to_datetime(data['start_timestamp'], errors='coerce')
-        data.set_index('start_timestamp', inplace=True)
+def format_analysis_for_telegram(cached_data):
+    """
+    Safely decodes Redis-cached data and fixes unicode emojis for Telegram.
+    """
+    if not cached_data:
+        return None
 
-    wave_indices = np.where(predicted_labels.flatten() == 1)[0]
-    if len(wave_indices) < 5:
-        return "Not enough data to determine market trend.", "Not enough identified wave points to analyze the trend.", []
+    try:
+        # Decode Redis bytes to UTF-8 string (don't touch encoding further!)
+        decoded_str = cached_data.decode('utf-8')
 
-    wave_points = wave_indices[:5]
-    waves_info = []
-
-    for i, idx in enumerate(wave_points):
+        # Parse JSON if necessary
         try:
-            timestamp = data.index[idx]
-            wave_time = pd.to_datetime(timestamp, errors='coerce')
-        except Exception as e:
-            logger.warning(f"Failed to parse timestamp at index {idx}: {e}")
-            wave_time = pd.NaT
+            parsed = json.loads(decoded_str)
+        except json.JSONDecodeError:
+            parsed = decoded_str
 
-        wave_price = data['close'].iloc[idx]
-        waves_info.append((i + 1, wave_time, wave_price))
+        # If parsed is still escaped Unicode (e.g., \\ud83d), decode it
+        if isinstance(parsed, str) and '\\u' in parsed:
+            parsed = bytes(parsed, 'utf-8').decode('unicode_escape')
 
-    # Validate with Elliott Wave rules
-    wave_1, wave_2, wave_3, wave_4, wave_5 = wave_points[:5]
+        return parsed
 
-    explanations = []
-    critical_violations = 0
+    except Exception as e:
+        print(f"Error formatting cached data: {e}")
+        return None
 
-    # Rule 1: Wave 2 should not retrace more than 100% of Wave 1
-    if data['close'].iloc[wave_2] <= data['close'].iloc[wave_1]:
-        explanations.append("Wave 2 retraced more than 100% of Wave 1, weakening the pattern.")
-        critical_violations += 1
-
-    # Rule 2: Wave 3 must be longer than Wave 1 and not the shortest
-    if not (data['close'].iloc[wave_3] > data['close'].iloc[wave_1] and 
-            data['close'].iloc[wave_3] > data['close'].iloc[wave_5]):
-        explanations.append("Wave 3 does not extend beyond Wave 1, weakening the pattern.")
-        critical_violations += 1
-
-    # Rule 3: Wave 4 should not overlap Wave 1 (non-critical)
-    if data['close'].iloc[wave_4] <= data['close'].iloc[wave_1]:
-        explanations.append("Wave 4 overlaps with Wave 1, which is less ideal but not disqualifying.")
-
-    # Rule 4: Fibonacci retracement for Wave 2 (warning)
-    wave_2_retrace = (data['close'].iloc[wave_2] - data['close'].iloc[wave_1]) / (
-        data['close'].iloc[wave_3] - data['close'].iloc[wave_1]
-    )
-    if wave_2_retrace > 0.618:
-        explanations.append("Wave 2 retraces more than the 61.8% Fibonacci level, which weakens the structure.")
-
-    # Compose detailed wave summary
-    detailed_explanation = "\n".join([
-        f"Wave {num}: Time = {wave_time.strftime('%Y-%m-%d %H:%M')}, Price = {price:.2f}"
-        for num, wave_time, price in waves_info if pd.notna(wave_time)
-    ])
-
-    # Determine trend
-    if critical_violations >= 2:
-        trend = "Indeterminate"
-        explanation = "The Elliott Wave pattern does not fully comply with critical rules, making the trend indeterminate.\n\n"
-    else:
-        if wave_points[4] > wave_points[2] and wave_points[3] > wave_points[1]:
-            trend = "Bullish"
-            explanation = (
-                "The market is showing a bullish trend.\n\nThe identified wave patterns indicate upward movements, "
-                "suggesting strong buying pressure.\n\n"
-            )
-        else:
-            trend = "Bearish"
-            explanation = (
-                "The market is showing a bearish trend.\n\nThe identified wave patterns indicate downward movements, "
-                "suggesting selling pressure.\n\n"
-            )
-
-    explanation += detailed_explanation
-    return trend, explanation, waves_info
-
-
-# Function to plot the data and predicted waves with Japanese candlesticks
-def plot_predicted_waves(data, predicted_labels, symbol, interval, look_back, trend, waves_info, token, price_predictions=None, num_candles=50):
-    # Ensure the index is a DatetimeIndex
-    if not isinstance(data.index, pd.DatetimeIndex):
-        if 'start_timestamp' in data.columns:
-            # Automatically parse datetime strings or timestamps
-            data['start_timestamp'] = pd.to_datetime(data['start_timestamp'], errors='coerce')
-            data.set_index('start_timestamp', inplace=True)
-        else:
-            raise ValueError("Data does not have a 'start_timestamp' column to convert to DatetimeIndex.")
-
-
-    # Slice the data to include only the last `num_candles` rows
-    plot_data = data.iloc[-(num_candles + look_back):]  # Include the look-back period
-
-    # The predictions and labels corresponding to the reduced plot_data
-    plot_prediction_indices = plot_data.index[look_back:]
-    plot_predicted_labels = predicted_labels[-len(plot_prediction_indices):]
-
-    # Ensure that we have enough labels for the reduced dataset
-    if len(plot_predicted_labels) != len(plot_data) - look_back:
-        raise ValueError("Adjusted predicted labels do not match the length of the data.")
-
-    plot_predicted_close_prices = plot_data['close'].iloc[look_back:]
-
-    fig, ax = plt.subplots(figsize=(14, 7))
-
-    # Plot the candlesticks
-    # Capitalize column names to match mplfinance expectations
-    plot_data = plot_data.rename(columns={
-        'open': 'Open',
-        'high': 'High',
-        'low': 'Low',
-        'close': 'Close',
-        'volume': 'Volume'
-    })
-
-    # Plot the candlesticks
-    mpf.plot(plot_data, type='candle', ax=ax, style='charles', show_nontrading=True)
-
-
-    # Plot the predicted wave points
-    wave_times = plot_prediction_indices[plot_predicted_labels.flatten() == 1]
-    wave_prices = plot_predicted_close_prices[plot_predicted_labels.flatten() == 1]
-    ax.scatter(wave_times, wave_prices, color='red', label='Predicted Wave')
-
-    # Annotate the wave points with numbers
-    for wave_num, wave_time, wave_price in waves_info:
-        if wave_time in plot_data.index:
-            ax.annotate(f'{wave_num}', (wave_time, wave_price), textcoords="offset points", xytext=(0, 10), ha='center', fontsize=8, color='green')
-
-    # Plot the price predictions if provided
-    if price_predictions is not None:
-        future_index = pd.date_range(start=plot_data.index[-1], periods=len(price_predictions) + 1, freq=plot_data.index.freq)[1:]
-        ax.plot(future_index, price_predictions, color='blue', linestyle='--', marker='o', label='Price Prediction')
-
-    # Improve the legibility of the chart
-    ax.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
-    plt.xticks(rotation=45)
-    plt.title(f'Predicted Elliott Waves and Price Prediction for {symbol} on {interval} interval')
-    plt.xlabel('Timestamp')
-    plt.ylabel('Price')
-    plt.legend()
-
-    # Define the media folder name
-    media_folder = 'media'
-
-    # Create the directory if it doesn't exist
-    os.makedirs(media_folder, exist_ok=True)
-
-    plt.savefig(os.path.join(media_folder, f'{symbol}_{interval}_predicted_waves.png'), bbox_inches='tight')
-    plt.close()
-
+    except Exception as e:
+        print(f"Error formatting cached data: {e}")
+        return None
+    
 # Function to analyze multiple intervals and return explanations using XGBRegressor
-async def analyze_intervals(asset, token, intervals=['1h', '4h', '1d']):
+async def analyze_intervals(asset, token, interval):
     explanations = {}
     look_back = 60
     future_steps = 10
-
-    for interval in intervals:
-        MODEL_KEY = f'Mockba/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
-        local_model_path = f'temp/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
-
-        if not download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-            logger.info(f"No model found for {asset} on {interval}.")
-            translated_message = translate(f"No model found for {asset} on {interval}. Contact support.", token)
-            await send_bot_message(token, translated_message)
-            continue  # Skip to next interval
-
-        try:
-            data = await fetch_crypto_data(asset, interval, token)
-
-            # Normalize
-            scaler = MinMaxScaler(feature_range=(0, 1))
-            scaled_data = scaler.fit_transform(data['close'].values.reshape(-1, 1))
-
-            X, Y = create_rf_dataset(scaled_data, look_back)
-            X = X.reshape(X.shape[0], -1)
-
-            model = joblib.load(local_model_path)
-            predictions = model.predict(X)
-
-            # Predict future prices
-            future_inputs = X[-1].reshape(1, -1)
-            future_predictions = []
-            for _ in range(future_steps):
-                future_price = model.predict(future_inputs)
-                future_predictions.append(future_price[0])
-                future_inputs = np.roll(future_inputs, -1)
-                future_inputs[0, -1] = future_price
-
-            future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
-            predicted_labels = (predictions > np.mean(predictions)).astype(int)
-
-            trend, explanation, waves_info = analyze_market_trend(predicted_labels, data)
-
-            final_prediction = future_predictions[-1]
-            current_price = data['close'].iloc[-1]
-            price_diff_percentage = ((final_prediction - current_price) / current_price) * 100
-
-            explanation += f"\n\nThe predicted price for the next period is {final_prediction:.6f}."
-            explanation += f"\n\nThis is a {price_diff_percentage:.2f}% change from the current price of {current_price:.6f}."
-
-            plot_predicted_waves(data, predicted_labels, asset, interval, look_back, trend, waves_info, token, price_predictions=future_predictions, num_candles=50)
-            
-            title = f"Analysis of {asset} on {interval} interval"
-            translated_title = translate(title, token)
-            await send_bot_message(token, translated_title)
-
-            translated_explanation = translate(explanation, token)
-            await send_bot_message(token, translated_explanation)
-            
-            chart_path = f'media/{asset}_{interval}_predicted_waves.png'
-            if os.path.exists(chart_path):
-                file = open(chart_path,'rb')
-                bot.send_document(token,file)
-                os.remove(chart_path)   
-          
-
-        except Exception as e:
-            logger.error(f"Error processing {interval}: {e}")
-            await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))
-
-        finally:
-            if os.path.exists(local_model_path):
-                os.remove(local_model_path)
+    analysis_translated = None
 
 
-    logger.info("All interval analyses completed.")
-    return explanations
+    MODEL_KEY = f'Mockba/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
+    local_model_path = f'temp/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
+
+    cache_key = f"elliot_waves:{asset}:{interval}"
+    
+    cached_data = await redis_client.get(cache_key)
+    if cached_data:
+        print("Returning cached analysis")
+        formatted_text = format_analysis_for_telegram(cached_data)
+        translated_text = translate(formatted_text, token)
+        await send_bot_message(token, translated_text)
+        return
+
+    if not download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+        logger.info(f"No model found for {asset} on {interval}.")
+        translated_message = translate(f"No model found for {asset} on {interval}. Contact support.", token)
+        await send_bot_message(token, translated_message)
+        return  # Skip to next interval
+
+    try:
+        data = fetch_historical_orderly(asset, interval)
+
+        # Normalize
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(data['close'].values.reshape(-1, 1))
+
+        X, Y = create_rf_dataset(scaled_data, look_back)
+        X = X.reshape(X.shape[0], -1)
+
+        model = joblib.load(local_model_path)
+        predictions = model.predict(X)
+
+        # Predict future prices
+        future_inputs = X[-1].reshape(1, -1)
+        future_predictions = []
+        for _ in range(future_steps):
+            future_price = model.predict(future_inputs)
+            future_predictions.append(future_price[0])
+            future_inputs = np.roll(future_inputs, -1)
+            future_inputs[0, -1] = future_price
+
+        future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
+        predicted_labels = (predictions > np.mean(predictions)).astype(int)
+
+        # --- Step 1: Get data ---
+        data_json = json.dumps(data.to_dict(orient='records'))
+        # --- Step 2: Future prediction ---
+        future_predictions_json = json.dumps(future_predictions.tolist())
+        # print(f"Future predictions: {future_predictions_json}")
+        # --- Step 3: PRedicted labels ---
+        predicted_labels_json = json.dumps(predicted_labels.tolist())
+        # print(f"Predicted labels: {predicted_labels_json}")
+
+        #######################################################################################
+        #######################################################################################
+        # Step 4: Send to DeepSeek API
+        prompt = f"""
+        **Task:** Generate a professional Elliott Wave analysis for {asset} ({interval}) with ML confirmation, optimized for Telegram traders.
+
+        ###Input Data:
+        1. Price Action:
+        {data_json}
+
+        2. ML Signals:
+        - Trend: {future_predictions_json}
+        - Confidence: {predicted_labels_json}
+
+        ###Analysis Rules:
+        Explanation
+        1 [2-3 sentences explaining the analysis]
+
+        2. Wave Validation:
+        - ✅ Valid if:
+            - Wave 2 stays above Wave 1 start
+            - Wave 3 is longest impulse wave
+            - Wave 4 doesn't enter Wave 1 territory
+        - ❌ Invalid if any rule breaks
+
+        3. ML Integration:
+        - Highlight confidence-weighted conflicts
+        - Flag high-probability reversals
+
+        Output Format:
+        🌊 {asset} {interval} | Elliot Waves Analysis
+
+        🔍 Pattern Status: 🟢 Valid | 🔴 Invalid  
+        - Wave 1: [Start] → [End]  
+        - Wave 2: Held at [Price] (X% pullback)  
+        - Wave 3: [Current] → [Target]  
+        - Next Phase: [Wave 4/5 or A-B-C]  
+
+        📊 Key Levels:  
+        - Buy Zone: [Level]  
+        - Take Profit: [Level]  
+        - Stop Loss: [Level]  
+
+        🤖 ML Cross-Check:  
+        - Trend: [Bullish/Bearish] (X% confidence)  
+        - Alert: [None/"Warning: ML contradicts Wave 5"]  
+
+        💬 Insight:  
+        "The current wave structure suggests [continuation/reversal] is likely, with ML providing [strong/weak] confirmation. The critical level to watch is [Price], where we expect [description of expected price action]. This creates a [high/medium] probability trading opportunity."
+
+        🚀 Final Verdict:  
+        "Based on the wave pattern and ML alignment, the recommended action is to [specific instruction] with defined risk management at [Level]. The next confirmation signal would be [price/condition], expected within [timeframe]."
+
+        Rules:
+        1. No markdown (**, `, ###, etc)
+        2. Use simple dashes (-) for bullets
+        3. Keep decimals consistent (2 places)
+        """
+                
+
+        # Send to DeepSeek API
+        # For your use case (temperature=0.3):
+        # Optimal for reliable, repeatable technical analysis.
+        # Sacrifices creativity for accuracy and consistency.
+        response = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",  # Verify the correct endpoint
+            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.3  # Lower = more deterministic
+            },
+            headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
+        )
+
+        if response.status_code == 200:
+            analysis = response.json()["choices"][0]["message"]["content"]
+            analysis_translated = translate(analysis, token)
+
+            # Store result in Redis with 20-minute expiration
+            await redis_client.setex(cache_key,
+                timedelta(minutes=20),
+                json.dumps(analysis))
+
+            await send_bot_message(token, analysis_translated)
+            # print(analysis_translated)
+        else:
+            print(f"Error: {response.status_code}, {response.text}")
+      
+    except Exception as e:
+        logger.error(f"Error processing {interval}: {e}")
+        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))
+
+    finally:
+        if os.path.exists(local_model_path):
+            os.remove(local_model_path)   
+    return analysis_translated                
 
 
 # Example usage
