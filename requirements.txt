@@ -9,6 +9,7 @@ anyio==4.7.0
 async-timeout==5.0.1
 asyncpg==0.30.0
 attrs==24.2.0
+base58==2.1.1
 beautifulsoup4==4.13.3
 billiard==4.2.1
 boto3==1.36.16
