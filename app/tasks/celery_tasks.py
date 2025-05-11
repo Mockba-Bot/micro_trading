@@ -105,9 +105,9 @@ def analyze_asset_task(
 
 
 
-@shared_task(queue="trading")
-def run_trader():
-    """
-    Celery task to execute the trader function.
-    """
-    return trader()
+# @shared_task(queue="trading")
+# def run_trader():
+#     """
+#     Celery task to execute the trader function.
+#     """
+#     return trader()
