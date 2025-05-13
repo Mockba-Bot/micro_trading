@@ -3,6 +3,7 @@ from celery import shared_task
 from app.models.backtest import run_backtest
 from app.models.elliot_waves import analyze_intervals
 from app.models.technical_analisys import analize_asset
+from app.models.gainers_analysis import analyze_movers
 import logging
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,34 @@ def analyze_asset_task(
     
     return result
 
+@shared_task(queue="trading")
+def analyze_movers_task(
+    token,
+    interval,
+    change_threshold=0.05,
+    type="gainers",
+    top_n=10
+):
+    
+    logger.info(f"Analyzing gainers with token {token} and timeframe {interval}")
+    
+    # ✅ Fix: Use `asyncio.get_event_loop()` instead of `asyncio.run()`
+    loop = asyncio.get_event_loop()
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    result = loop.run_until_complete(
+        analyze_movers(
+            token,
+            interval,
+            change_threshold,
+            type,
+            top_n
+        )
+    )
+    
+    return result
 
 
 # @shared_task(queue="trading")

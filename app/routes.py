@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from celery.result import AsyncResult
 from app.tasks.celery_app import celery_app
-from app.tasks.celery_tasks import run_backtest_task, analyze_intervals_task, analyze_asset_task
+from app.tasks.celery_tasks import run_backtest_task, analyze_intervals_task, analyze_asset_task, analyze_movers_task
 from typing import List, Optional
 
 class BacktestRequest(BaseModel):
@@ -31,10 +31,18 @@ class AnalyzeAssetRequest(BaseModel):
     timeframe: str
     features: Optional[List[str]] = None    
 
+class GainersAnalysisRequest(BaseModel):
+    token: str
+    interval: str 
+    change_threshold: float   
+    type: str = "gainers"  # Default to "gainers"
+    top_n: int = 10  # Optional parameter for top N movers
+
 backtest_router = APIRouter()
 status_router = APIRouter()
 analyze_router = APIRouter()
 analyze_asset_router = APIRouter()
+gainers_analysis_router = APIRouter()
 
 @backtest_router.post("/backtest")
 async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
@@ -104,4 +112,22 @@ async def analyze_asset_api(request: Request, analyze_asset_request: AnalyzeAsse
         )
         return {"task_id": task.id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))        
+        raise HTTPException(status_code=500, detail=str(e))  
+
+
+@status_router.post("/gainers_analysis")
+async def gainers_analysis_api(request: Request, gainers_analysis_request: GainersAnalysisRequest):
+    """
+    Perform gainers analysis with the given parameters.
+    """
+    try:
+        task = analyze_movers_task.delay(
+            gainers_analysis_request.token,
+            gainers_analysis_request.interval,
+            gainers_analysis_request.change_threshold,
+            gainers_analysis_request.type,
+            gainers_analysis_request.top_n
+        )
+        return {"task_id": task.id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))          
