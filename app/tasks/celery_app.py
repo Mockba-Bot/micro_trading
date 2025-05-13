@@ -26,13 +26,13 @@ celery_app.conf.update(
 )
 
 # Configure periodic tasks
-celery_app.conf.beat_schedule = {
-    'run-trader-every-5-minutes': {
-        'task': 'app.tasks.celery_tasks.run_trader',  # Path to the run_trader task
-        'schedule': 600.0,  # Run every 600 seconds (10 minutes)
-        'options': {'queue': 'trading'},  # Ensure it runs in the "trading" queue
-    },
-}
+# celery_app.conf.beat_schedule = {
+#     'run-trader-every-5-minutes': {
+#         'task': 'app.tasks.celery_tasks.run_trader',  # Path to the run_trader task
+#         'schedule': 600.0,  # Run every 600 seconds (10 minutes)
+#         'options': {'queue': 'trading'},  # Ensure it runs in the "trading" queue
+#     },
+# }
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
