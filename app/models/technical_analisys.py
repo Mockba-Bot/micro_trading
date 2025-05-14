@@ -648,21 +648,12 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
         # data.to_csv(f'temp/data_{asset}_{interval}.csv')
         data_json = json.dumps(data.to_dict(orient='records'))
 
-        #######################################################################################
-        #######################################################################################
-
-        # --- Step 2: Get asset info ---
-        # Get Asset Info
-        asset_info = await fetch_asset_info(asset)
-        asset_info_df = pd.DataFrame([asset_info])
-        # asset_info_df.to_csv(f'temp/asset_info_{asset}.csv')
-        asset_info_json = json.dumps(asset_info_df.to_dict(orient='records'))
 
         #######################################################################################
         #######################################################################################
 
 
-        # --- Step 3: Get Order Book Snapshot ---
+        # --- Step 2: Get Order Book Snapshot ---
         # Get Orfer Book Snapshot
         order_book_snapshot = fetch_order_book_snapshot(asset)
         order_book_snapshot_df = pd.DataFrame(order_book_snapshot)
@@ -671,7 +662,7 @@ async def analize_asset(token, asset, interval, features, market_bias='neutral')
 
         #######################################################################################
         #######################################################################################
-        # Step 4: Send to DeepSeek API
+        # Step 3: Send to DeepSeek API
         prompt = f"""
         **Task:** Generate a professional trading analysis for {asset} {interval} with clear verdict and recommendations, also Generate exactly 2 trade setups (1 long, 1 short) with clear triggers and fixed risk parameters, optimized for Telegram.
 
