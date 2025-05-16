@@ -615,35 +615,36 @@ async def analize_asset(token, asset, interval, features, leverage, market_bias=
             **Task:** Generate a professional trading analysis for {asset} {interval} with {leverage}x leverage in the exact format specified below and optimize for Telegram.
 
             ### Required Format:
-            [Asset/Timeframe] Technical Analysis
+            [Asset/Timeframe] Technical Analysis - {get_strategy_name(interval, features)}
             🔹 Current Price: {current_price}
             🔸 Market Phase: [trending/consolidating/reversing]
             🔸 Last Signals: {last_3_predictions} → Current: {current_prediction} ({confidence_level} confidence)
+            🔸 Active Indicators: {features}
 
-            📊 Key Indicators
-            - [Indicator 1]: [value] → [interpretation]
-            - [Indicator 2]: [value] → [interpretation]
+            📊 Key Indicators (Using: {get_strategy_name(interval, features)})
+            - [Indicator from {features}]: [value] → [interpretation]
+            - [Indicator from {features}]: [value] → [interpretation]
 
-            📈 Trend Analysis
+            📈 Trend Analysis (Based on {[ind for ind in features if 'ema' in ind or 'ma' in ind]})
             - Direction: [trend_direction] ([strength])
             - MA Cross: [ema_cross_status]
-            - Volatility: [volatility_level] (ATR: [value])
+            - Volatility: [volatility_level] (using {[ind for ind in features if 'atr' in ind or 'std' in ind]})
 
             🎯 Critical Levels
             - Support: [level1], [level2]
             - Resistance: [level1], [level2]
 
-            ⚡ {leverage}x Trading Signals
+            ⚡ {leverage}x Trading Signals ({get_strategy_name(interval, features)} Strategy)
 
             🔵 LONG Setup (Bullish)
-            - Trigger: [clear_condition_for_entry]
+            - Trigger: [condition using {features}]
             - Entry Zone: [entry_price_range]
             - TP: [target_price] (+[target_percent]%)
             - SL: [stop_price] (-[stop_percent]%)
             - Confidence: [high/medium/low]
 
             🔴 SHORT Setup (Bearish) 
-            - Trigger: [clear_condition_for_entry]
+            - Trigger: [condition using {features}]
             - Entry Zone: [entry_price_range]
             - TP: [target_price] (-[target_percent]%)
             - SL: [stop_price] (+[stop_percent]%) 
