@@ -187,10 +187,10 @@ async def fetch_crypto_data(asset, interval, token, max_retries=5, retry_delay=5
 # ✅ Fetch historical Orderly data with global rate limiting
 rate_limiter = RateLimiter(max_calls=10, period=1)
 def fetch_historical_orderly(symbol, interval):
-    rate_limiter()  # ✅ Apply global rate limit
+    rate_limiter()
 
     timestamp = str(int(time.time() * 1000))
-    params = {"symbol": symbol, "type": interval, "limit": 1000}
+    params = {"symbol": symbol, "type": interval, "limit": 100}  # Get exactly 100 candles
     path = "/v1/kline"
     query = f"?{urllib.parse.urlencode(params)}"
     message = f"{timestamp}GET{path}{query}"
@@ -221,7 +221,10 @@ def fetch_historical_orderly(symbol, interval):
         df.set_index('start_timestamp', inplace=True)
         df = df[["open", "high", "low", "close", "volume"]]
         df = df[~df.index.duplicated(keep='first')]  # Remove duplicates
-        return df
+        
+        # Sort by date (newest first) and return last 100
+        return df.sort_index(ascending=False).head(100)
+    
     return None
 
 
@@ -266,7 +269,6 @@ def format_analysis_for_telegram(cached_data):
     
 # Function to analyze multiple intervals and return explanations using XGBRegressor
 async def analyze_intervals(asset, token, interval):
-    explanations = {}
     look_back = 60
     future_steps = 10
     analysis_translated = None
@@ -275,15 +277,6 @@ async def analyze_intervals(asset, token, interval):
     MODEL_KEY = f'Mockba/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
     local_model_path = f'temp/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
 
-    cache_key = f"elliot_waves:{asset}:{interval}"
-    
-    cached_data = await redis_client.get(cache_key)
-    if cached_data:
-        print("Returning cached analysis")
-        formatted_text = format_analysis_for_telegram(cached_data)
-        translated_text = translate(formatted_text, token)
-        await send_bot_message(token, translated_text)
-        return
 
     if not download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
         logger.info(f"No model found for {asset} on {interval}.")
@@ -411,12 +404,6 @@ async def analyze_intervals(asset, token, interval):
         if response.status_code == 200:
             analysis = response.json()["choices"][0]["message"]["content"]
             analysis_translated = translate(analysis, token)
-
-            # Store result in Redis with 20-minute expiration
-            await redis_client.setex(cache_key,
-                timedelta(minutes=20),
-                json.dumps(analysis))
-
             await send_bot_message(token, analysis_translated)
             # print(analysis_translated)
         else:

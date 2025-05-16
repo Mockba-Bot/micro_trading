@@ -170,16 +170,26 @@ def add_indicators(data, required_features):
                 print(f"⚠️ Warning: Could not extract window size from feature: {feature}")
 
     # --- Bollinger Bands ---
-    for feature in required_features:
-        if feature.startswith("bollinger_"):
-            try:
-                window = int(feature.split("_")[-1])  # Extract window size from feature name
+    # If 'bollinger_hband' or 'bollinger_lband' is in required_features, ensure they are added with default window=20 if not already present
+    bollinger_features = [f for f in required_features if f.startswith("bollinger_")]
+    if ("bollinger_hband" in required_features or "bollinger_lband" in required_features) and not any(f.startswith("bollinger_hband_") or f.startswith("bollinger_lband_") for f in required_features):
+        window = 20
+        data['bollinger_mavg'] = data['close'].rolling(window=window).mean()
+        data['bollinger_std'] = data['close'].rolling(window=window).std()
+        data['bollinger_hband'] = data['bollinger_mavg'] + (data['bollinger_std'] * 2)
+        data['bollinger_lband'] = data['bollinger_mavg'] - (data['bollinger_std'] * 2)
+    for feature in bollinger_features:
+        try:
+            # If the feature has a window, extract it, else skip (already handled above)
+            parts = feature.split("_")
+            if len(parts) > 2:
+                window = int(parts[-1])
                 data['bollinger_mavg'] = data['close'].rolling(window=window).mean()
                 data['bollinger_std'] = data['close'].rolling(window=window).std()
                 data['bollinger_hband'] = data['bollinger_mavg'] + (data['bollinger_std'] * 2)
                 data['bollinger_lband'] = data['bollinger_mavg'] - (data['bollinger_std'] * 2)
-            except (IndexError, ValueError):
-                print(f"⚠️ Warning: Could not extract window size from feature: {feature}")
+        except (IndexError, ValueError):
+            print(f"⚠️ Warning: Could not extract window size from feature: {feature}")
 
     # --- Standard Deviation ---
     for feature in required_features:

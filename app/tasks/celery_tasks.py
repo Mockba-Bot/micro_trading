@@ -82,7 +82,8 @@ def analyze_asset_task(
     token,
     asset,
     interval,
-    features=None
+    features=None,
+    leverage=10,
 ):
     
     logger.info(f"Analyzing asset {asset} with token {token} and timeframe {interval}")
@@ -98,7 +99,8 @@ def analyze_asset_task(
             token,
             asset,
             interval,
-            features
+            features,
+            leverage
         )
     )
     

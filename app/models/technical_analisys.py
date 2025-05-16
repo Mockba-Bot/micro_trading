@@ -174,10 +174,10 @@ async def send_bot_message(token, message):
 
 # ✅ Fetch historical Orderly data with global rate limiting
 def fetch_historical_orderly(symbol, interval):
-    rate_limiter()  # ✅ Apply global rate limit
+    rate_limiter()
 
     timestamp = str(int(time.time() * 1000))
-    params = {"symbol": symbol, "type": interval, "limit": 1000}
+    params = {"symbol": symbol, "type": interval, "limit": 100}  # Get exactly 100 candles
     path = "/v1/kline"
     query = f"?{urllib.parse.urlencode(params)}"
     message = f"{timestamp}GET{path}{query}"
@@ -208,7 +208,10 @@ def fetch_historical_orderly(symbol, interval):
         df.set_index('start_timestamp', inplace=True)
         df = df[["open", "high", "low", "close", "volume"]]
         df = df[~df.index.duplicated(keep='first')]  # Remove duplicates
-        return df
+        
+        # Sort by date (newest first) and return last 100
+        return df.sort_index(ascending=False).head(100)
+    
     return None
 
 
@@ -251,16 +254,26 @@ def add_indicators(data, required_features):
                 print(f"⚠️ Warning: Could not extract window size from feature: {feature}")
 
     # --- Bollinger Bands ---
-    for feature in required_features:
-        if feature.startswith("bollinger_"):
-            try:
-                window = int(feature.split("_")[-1])  # Extract window size from feature name
+    # If 'bollinger_hband' or 'bollinger_lband' is in required_features, ensure they are added with default window=20 if not already present
+    bollinger_features = [f for f in required_features if f.startswith("bollinger_")]
+    if ("bollinger_hband" in required_features or "bollinger_lband" in required_features) and not any(f.startswith("bollinger_hband_") or f.startswith("bollinger_lband_") for f in required_features):
+        window = 20
+        data['bollinger_mavg'] = data['close'].rolling(window=window).mean()
+        data['bollinger_std'] = data['close'].rolling(window=window).std()
+        data['bollinger_hband'] = data['bollinger_mavg'] + (data['bollinger_std'] * 2)
+        data['bollinger_lband'] = data['bollinger_mavg'] - (data['bollinger_std'] * 2)
+    for feature in bollinger_features:
+        try:
+            # If the feature has a window, extract it, else skip (already handled above)
+            parts = feature.split("_")
+            if len(parts) > 2:
+                window = int(parts[-1])
                 data['bollinger_mavg'] = data['close'].rolling(window=window).mean()
                 data['bollinger_std'] = data['close'].rolling(window=window).std()
                 data['bollinger_hband'] = data['bollinger_mavg'] + (data['bollinger_std'] * 2)
                 data['bollinger_lband'] = data['bollinger_mavg'] - (data['bollinger_std'] * 2)
-            except (IndexError, ValueError):
-                print(f"⚠️ Warning: Could not extract window size from feature: {feature}")
+        except (IndexError, ValueError):
+            print(f"⚠️ Warning: Could not extract window size from feature: {feature}")
 
     # --- Standard Deviation ---
     for feature in required_features:
@@ -535,243 +548,170 @@ def format_analysis_for_telegram(cached_data):
 
 
 
-async def analize_asset(token, asset, interval, features, market_bias='neutral'):
+async def analize_asset(token, asset, interval, features, leverage, market_bias='neutral'):
     print('Getting data for analysis') 
     analysis_translated = None
-    # Generate dynamic file names
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
     
-    
-    cache_key = f"analisys:{asset}:{interval}:{features}"
-    
-    cached_data = await redis_client.get(cache_key)
-    if cached_data:
-        print("Returning cached analysis")
-        formatted_text = format_analysis_for_telegram(cached_data)
-        translated_text = translate(formatted_text, token)
-        await send_bot_message(token, translated_text)
-        return
-        
 
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-        data = fetch_historical_orderly(asset, interval)
-        #######################################################################################
-        #######################################################################################
- 
-        # --- Step 1 Analize data, add indicators and prepare for prediction ---
-        # Load the model
-        model_metadata = joblib.load(local_model_path)
-        model = model_metadata["model"]
-        used_features = model_metadata.get("used_features", [])
+        try:
+            data = fetch_historical_orderly(asset, interval)
+            
+            # --- Step 1: Analyze data and prepare for prediction ---
+            model_metadata = joblib.load(local_model_path)
+            model = model_metadata["model"]
+            used_features = model_metadata.get("used_features", [])
 
-        # Add missing features to the dataset
-        missing_features = [f for f in used_features if f not in data.columns]
-        if missing_features:
-            data = add_indicators(data, missing_features)
+            # Add missing features to the dataset
+            missing_features = [f for f in used_features if f not in data.columns]
+            if missing_features:
+                data = add_indicators(data, missing_features)
 
-        # 
-        # Set start_timestamp as the index
-        # data.set_index('start_timestamp', inplace=True)    
+            # Ensure dataset contains only trained features and in correct order
+            data = data[used_features].dropna().copy()
 
-        # Ensure dataset contains only trained features and in correct order
-        data = data[used_features]
+            # --- Predict class probabilities
+            y_proba = model.predict_proba(data[features])
+            proba_df = pd.DataFrame(y_proba, columns=model.classes_)
 
-        # --- 1️⃣ Prepare Data ---
-        data = data.dropna().copy()
-
-        # --- Predict class probabilities
-        y_proba = model.predict_proba(data[features])
-        proba_df = pd.DataFrame(y_proba, columns=model.classes_)
-
-        # --- 🔍 Step 1: Get average class-wise confidence
-        class_probs = proba_df.mean()
-        # print("📊 Average Confidence per Class:", class_probs.to_dict())
-
-        # --- ⚖️ Step 2: Dynamically adjust thresholds based on class imbalance
-        # --- ⚖️ Adjust thresholds based on class imbalance and market bias ---
-        base_percentile = 50
-        thresholds = {}
-
-        for cls in model.classes_:
-            adjustment = 0
-            if class_probs[cls] < 0.3:
-                adjustment = -10  # Boost underrepresented classes
-            elif class_probs[cls] > 0.5:
-                adjustment = +10  # Penalize dominant classes
-
-            # Extra adjustment based on market bias
+            # --- Generate predictions ---
+            target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
             if market_bias == 'bullish':
-                if cls == 1:
-                    adjustment -= 5  # Make long signals easier to trigger
-                elif cls == -1:
-                    adjustment += 5  # Make short signals harder
+                target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
             elif market_bias == 'bearish':
-                if cls == -1:
-                    adjustment -= 5  # Make short signals easier
-                elif cls == 1:
-                    adjustment += 5  # Make long signals harder
+                target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}
 
-            percentile = max(10, min(90, base_percentile + adjustment))
-            thresholds[cls] = np.percentile(proba_df[cls], percentile)
+            n_samples = len(proba_df)
+            target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
 
-        # --- 🧠 Apply class distribution rules to generate predictions ---
-        # Define default signal distribution
-        target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
+            y_custom = np.zeros(n_samples, dtype=int)
+            for cls in [-1, 1]:
+                top_indices = proba_df[cls].nlargest(target_counts[cls]).index
+                y_custom[top_indices] = cls
 
-        # Modify class distribution based on market bias
-        if market_bias == 'bullish':
-            target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}  # More longs
-        elif market_bias == 'bearish':
-            target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}  # More shorts
+            data['predicted'] = y_custom
+            data['close_pct_change'] = data['close'].pct_change()
+            
+            # Get current market data
+            current_price = data['close'].iloc[-1]
+            last_3_predictions = data['predicted'].tail(3).tolist()
+            current_prediction = data['predicted'].iloc[-1]
+            confidence_score = int(proba_df.max(axis=1).iloc[-1] * 100)
+            confidence_level = "High" if confidence_score > 70 else "Medium" if confidence_score > 50 else "Low"
 
-        n_samples = len(proba_df)
-        target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
+            # --- Order Book Analysis ---
+            order_book_snapshot = fetch_order_book_snapshot(asset)
+            order_book_snapshot_df = pd.DataFrame(order_book_snapshot)
+            
+            # Prepare data for API
+            data_json = json.dumps(data.tail(100).to_dict(orient='records'))
+            order_book_snapshot_json = json.dumps(order_book_snapshot_df.to_dict(orient='records'))
 
-        # Start with all hold
-        y_custom = np.zeros(n_samples, dtype=int)
+            # --- Generate Professional Prompt ---
+            prompt = f"""
+            **Task:** Generate a professional trading analysis for {asset} {interval} with {leverage}x leverage in the exact format specified below and optimize for Telegram.
 
-        # Assign top-N short and long predictions
-        for cls in [-1, 1]:
-            top_indices = proba_df[cls].nlargest(target_counts[cls]).index
-            y_custom[top_indices] = cls
+            ### Required Format:
+            [Asset/Timeframe] Technical Analysis
+            🔹 Current Price: {current_price}
+            🔸 Market Phase: [trending/consolidating/reversing]
+            🔸 Last Signals: {last_3_predictions} → Current: {current_prediction} ({confidence_level} confidence)
 
-        # Assign predictions
-        data['predicted'] = y_custom
+            📊 Key Indicators
+            - [Indicator 1]: [value] → [interpretation]
+            - [Indicator 2]: [value] → [interpretation]
 
-        # Add a new column for percentage change in 'close'
-        data['close_pct_change'] = data['close'].pct_change()  # Percentage change between current and previous 'close'
-        data = data.tail(100)  # Keep only the last 100 rows
-        
-        # Export data to CSV
-        # data.to_csv(f'temp/data_{asset}_{interval}.csv')
-        data_json = json.dumps(data.to_dict(orient='records'))
+            📈 Trend Analysis
+            - Direction: [trend_direction] ([strength])
+            - MA Cross: [ema_cross_status]
+            - Volatility: [volatility_level] (ATR: [value])
 
+            🎯 Critical Levels
+            - Support: [level1], [level2]
+            - Resistance: [level1], [level2]
 
-        #######################################################################################
-        #######################################################################################
+            ⚡ {leverage}x Trading Signals
 
+            🔵 LONG Setup (Bullish)
+            - Trigger: [clear_condition_for_entry]
+            - Entry Zone: [entry_price_range]
+            - TP: [target_price] (+[target_percent]%)
+            - SL: [stop_price] (-[stop_percent]%)
+            - Confidence: [high/medium/low]
 
-        # --- Step 2: Get Order Book Snapshot ---
-        # Get Orfer Book Snapshot
-        order_book_snapshot = fetch_order_book_snapshot(asset)
-        order_book_snapshot_df = pd.DataFrame(order_book_snapshot)
-        # order_book_snapshot_df.to_csv(f'temp/order_book_snapshot_{asset}.csv')
-        order_book_snapshot_json = json.dumps(order_book_snapshot_df.to_dict(orient='records'))
+            🔴 SHORT Setup (Bearish) 
+            - Trigger: [clear_condition_for_entry]
+            - Entry Zone: [entry_price_range]
+            - TP: [target_price] (-[target_percent]%)
+            - SL: [stop_price] (+[stop_percent]%) 
+            - Confidence: [high/medium/low]
 
-        #######################################################################################
-        #######################################################################################
-        # Step 3: Send to DeepSeek API
-        prompt = f"""
-        **Task:** Generate a professional trading analysis for {asset} {interval} with clear verdict and recommendations, also Generate exactly 2 trade setups (1 long, 1 short) with clear triggers and fixed risk parameters, optimized for Telegram.
+            🟡 HOLD Recommendation (Neutral)
+            - Conditions: [market_conditions_for_holding]
+            - Duration: [expected_hold_timeframe]
+            - Next Trigger: [key_level_for_action]
 
-        ###Raw Data to Analyze:
-        1. PRICE/INDICATORS (Last 100 rows):
-        {data_json} 
+            💰 Leverage Math
+            - Profit Potential: {leverage}×[target_percent]% move = +[potential_profit]%
+            - Risk Exposure: {leverage}×[stop_percent]% move = -[potential_loss]%
+            - Position Size: ≤[recommended_percent]% of capital
 
-        2. ASSET CONTEXT:
-        {asset_info_json} 
+            ⚠️ Risk Alert
+            - Immediate Risk: [key_risk_factor]
+            - Liquidation Warning: [nearest_liquidation_zone]
+            - Alternative Strategy: [safer_approach_if_applicable]
 
-        3. INDICATORS PRESENT:  
-        - f"{features}, `Predicted` (ML signals: -1=Short, 0=Hold, 1=Long), close_pct_change" 
+            📌 FINAL RECOMMENDATION
+            🎯 Best Action: [LONG/SHORT/HOLD] 
+            🔍 Reason: [2-3_sentence_rationale]
+            ⏱️ Valid Until: [timeframe_or_key_level]
+            📊 Confidence: [high/medium/low]
 
-        4 ASSET INFO:
-        {asset_info_json}
+            ✅ Strengths: [bullish_factors] 
+            ⛔ Weaknesses: [bearish_factors]
+            🔮 Next Decision Point: [key_level/time_event]
 
-        5. ORDER BOOK SNAPSHOT:
-        {order_book_snapshot_json}
+            (Not financial advice - DYOR)
 
-        Strict Output Rules:
-        📊 {asset} {interval}, {get_strategy_name(interval, features)} TA Report
+            ### Analysis Data:
+            1. Price Action: {data_json}
+            2. Order Book: {order_book_snapshot_json}
+            3. Model Confidence: {confidence_score}/100
+            4. Volume Analysis: [volume_commentary]
+            5. Liquidity: [liquidity_assessment]
+            """
+            # Send to DeepSeek API
+            response = requests.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a professional trading analyst specializing in leveraged trading. Generate concise reports in plain text with clear sections. Use emojis for visual organization but no markdown formatting. All numbers to 2 decimals. Focus on leverage-specific risks and opportunities."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": 0.3
+                },
+                headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
+            )
 
-        Explanation
-        - [2-3 sentences explaining the analysis]
-        📉 Price Action
+            if response.status_code == 200:
+                analysis = response.json()["choices"][0]["message"]["content"]
+                analysis_translated = translate(analysis, token)
+                await send_bot_message(token, analysis_translated)
+            else:
+                print(f"Error: {response.status_code}, {response.text}")
+          
+        finally:
+            if os.path.exists(local_model_path):
+                os.remove(local_model_path)
 
-        📈 [Trend]
-        ➖/➕ [EMA20 vs EMA50] + [ADX <25?>]
-        🔸 [VWAP relation] + [MACD direction]
-
-        📊 [Volume]
-        ➖/➕ [Volume trend] + [Volume spikes]
-
-        🎯 [Key Zones]
-        ▪️ Support: [strongest 2 levels]
-        ▪️ Resistance: [strongest 2 levels]
-
-        🤖 [ML Signals]
-        🔹 Recent: [last 3 predictions] 
-        🔸 Now: [current prediction] @ [price]
-
-        💧 [Liquidity]
-        🛡️ Asks: [size] @ [price] 
-        🛡️ Bids: [size] @ [price]
-
-        💰 [Asset Info]
-        ▪️ Std Liquidation Fee: [value]
-        ▪️ Liquidator Fee: [value]
-        ▪️ Min Notional: [value]
-        ▪️ Quote Max: [value]
-
-        ⚡ [Setups]
-        2) [Trigger] → TP:[target] SL:[stop]
-        3) [Trigger] → TP:[target] SL:[stop]
-
-        📌 [Verdict and Summary]
-        ▪️ [1-sentence bias]
-        ⚠️ [Key risk] 
-        ⌚ Next check: [time/condition] 
-
-        Rules:
-        1. No markdown (**, `, ###, etc)
-        2. Use simple dashes (-) for bullets
-        3. Keep decimals consistent (2 places)
-        """
-
-
-        # Send to DeepSeek API
-        # For your use case (temperature=0.3):
-        # Optimal for reliable, repeatable technical analysis.
-        # Sacrifices creativity for accuracy and consistency.
-        response = requests.post(
-            "https://api.deepseek.com/v1/chat/completions",  # Verify the correct endpoint
-            json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": 0.3  # Lower = more deterministic
-            },
-            headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
-        )
-
-        if response.status_code == 200:
-            analysis = response.json()["choices"][0]["message"]["content"]
-            analysis_translated = translate(analysis, token)
-
-            # Store result in Redis with 20-minute expiration
-            await redis_client.setex(cache_key,
-                timedelta(minutes=20),
-                json.dumps(analysis))
-
-            await send_bot_message(token, analysis_translated)
-            # print(analysis_translated)
-        else:
-            print(f"Error: {response.status_code}, {response.text}")
-      
-        # Delete local model file after upload
-        if os.path.exists(local_model_path):
-           os.remove(local_model_path)
-        else:
-           print(f"Local file {local_model_path} does not exist.")
-
-    return analysis_translated       
-    
+    return analysis_translated

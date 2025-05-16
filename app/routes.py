@@ -30,6 +30,7 @@ class AnalyzeAssetRequest(BaseModel):
     asset: str
     timeframe: str
     features: Optional[List[str]] = None    
+    leverage: int = 10
 
 class GainersAnalysisRequest(BaseModel):
     token: str
@@ -108,7 +109,8 @@ async def analyze_asset_api(request: Request, analyze_asset_request: AnalyzeAsse
             analyze_asset_request.token,
             analyze_asset_request.asset,
             analyze_asset_request.timeframe,
-            analyze_asset_request.features
+            analyze_asset_request.features,
+            analyze_asset_request.leverage
         )
         return {"task_id": task.id}
     except Exception as e:
