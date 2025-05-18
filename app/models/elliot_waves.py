@@ -83,16 +83,8 @@ class RateLimiter:
             self.calls.append(time.time())    
 
 # Translate function to convert text to the target language
-def translate(text, token):
-    """Translate text to the target language using GoogleTranslator."""
-    response = requests.get(f"{MICRO_CENTRAL_URL}/tlogin/{token}")
-    if response.status_code == 200:
-        user_data = response.json()
-        target_lang = user_data.get('language', 'en')
-        if target_lang == 'en':
-            return text
+def translate(text, target_lang):
         return GoogleTranslator(source='auto', target=target_lang).translate(text)
-    return text  # Return original text if translation fails
 
 # Send bot message function
 async def send_bot_message(token, message, file_path=None):
@@ -268,7 +260,7 @@ def format_analysis_for_telegram(cached_data):
         return None
     
 # Function to analyze multiple intervals and return explanations using XGBRegressor
-async def analyze_intervals(asset, token, interval):
+async def analyze_intervals(asset, token, interval, target_lang):
     look_back = 60
     future_steps = 10
     analysis_translated = None
@@ -403,7 +395,7 @@ async def analyze_intervals(asset, token, interval):
 
         if response.status_code == 200:
             analysis = response.json()["choices"][0]["message"]["content"]
-            analysis_translated = translate(analysis, token)
+            analysis_translated = translate(analysis, target_lang)
             await send_bot_message(token, analysis_translated)
             # print(analysis_translated)
         else:

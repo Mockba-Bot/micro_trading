@@ -32,16 +32,8 @@ ORDERLY_PUBLIC_KEY = os.getenv("ORDERLY_PUBLIC_KEY")
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 10))
 DEEP_SEEK_API_KEY = os.getenv("DEEP_SEEK_API_KEY")
 
-def translate(text, token):
-    """Translate text to the target language using GoogleTranslator."""
-    response = requests.get(f"{MICRO_CENTRAL_URL}/tlogin/{token}")
-    if response.status_code == 200:
-        user_data = response.json()
-        target_lang = user_data.get('language', 'en')
-        if target_lang == 'en':
-            return text
+def translate(text, target_lang):
         return GoogleTranslator(source='auto', target=target_lang).translate(text)
-    return text  # Return original text if translation fails
 
 if not ORDERLY_SECRET or not ORDERLY_PUBLIC_KEY:
     raise ValueError("❌ ORDERLY_SECRET or ORDERLY_PUBLIC_KEY environment variables are not set!")
@@ -548,7 +540,7 @@ def format_analysis_for_telegram(cached_data):
 
 
 
-async def analize_asset(token, asset, interval, features, leverage, market_bias='neutral'):
+async def analize_asset(token, asset, interval, features, leverage, target_lang, market_bias='neutral'):
     print('Getting data for analysis') 
     analysis_translated = None
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
@@ -706,7 +698,7 @@ async def analize_asset(token, asset, interval, features, leverage, market_bias=
 
             if response.status_code == 200:
                 analysis = response.json()["choices"][0]["message"]["content"]
-                analysis_translated = translate(analysis, token)
+                analysis_translated = translate(analysis, target_lang)
                 await send_bot_message(token, analysis_translated)
             else:
                 print(f"Error: {response.status_code}, {response.text}")

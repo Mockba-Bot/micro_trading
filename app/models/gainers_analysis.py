@@ -40,16 +40,8 @@ ORDERLY_PUBLIC_KEY = os.getenv("ORDERLY_PUBLIC_KEY")
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 10))
 DEEP_SEEK_API_KEY = os.getenv("DEEP_SEEK_API_KEY")
 
-def translate(text, token):
-    """Translate text to the target language using GoogleTranslator."""
-    response = requests.get(f"{MICRO_CENTRAL_URL}/tlogin/{token}")
-    if response.status_code == 200:
-        user_data = response.json()
-        target_lang = user_data.get('language', 'en')
-        if target_lang == 'en':
-            return text
+def translate(text, target_lang):
         return GoogleTranslator(source='auto', target=target_lang).translate(text)
-    return text  # Return original text if translation fails
 
 if not ORDERLY_SECRET or not ORDERLY_PUBLIC_KEY:
     raise ValueError("❌ ORDERLY_SECRET or ORDERLY_PUBLIC_KEY environment variables are not set!")
@@ -551,7 +543,7 @@ def clear_stored_gainers(token):
     if token in session_gainers:
         del session_gainers[token]
 
-async def analyze_movers(token, interval='1h', change_threshold=0, type='gainers', top_n=10):
+async def analyze_movers(token, target_lang, interval='1h', change_threshold=0, type='gainers', top_n=10):
     """
     Analyze top gainers or losers and send a readable Telegram message.
     
@@ -589,7 +581,7 @@ async def analyze_movers(token, interval='1h', change_threshold=0, type='gainers
             message_lines.append(f"• `{symbol}`: {increase:.2f}% (Δ {price_change_percent:.2f}%)")
 
     message = "\n".join(message_lines)
-    message_translated = translate(message, token)
+    message_translated = translate(message, target_lang)
     await send_bot_message(token, message_translated)
 
     return top_filtered

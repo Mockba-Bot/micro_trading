@@ -24,6 +24,7 @@ class AnalyzeIntervalsRequest(BaseModel):
     asset: str
     token: str 
     interval : str
+    target_lang: str
 
 class AnalyzeAssetRequest(BaseModel):
     token: str
@@ -31,9 +32,11 @@ class AnalyzeAssetRequest(BaseModel):
     timeframe: str
     features: Optional[List[str]] = None    
     leverage: int = 10
+    target_lang: str = "en"
 
 class GainersAnalysisRequest(BaseModel):
     token: str
+    target_lang: str
     interval: str 
     change_threshold: float   
     type: str = "gainers"  # Default to "gainers"
@@ -93,6 +96,7 @@ async def analyze_intervals_api(request: Request, analyze_request: AnalyzeInterv
             analyze_request.asset,
             analyze_request.token,
             analyze_request.interval
+            analyze_request.target_lang
         )
         return {"task_id": task.id}
     except Exception as e:
@@ -110,7 +114,8 @@ async def analyze_asset_api(request: Request, analyze_asset_request: AnalyzeAsse
             analyze_asset_request.asset,
             analyze_asset_request.timeframe,
             analyze_asset_request.features,
-            analyze_asset_request.leverage
+            analyze_asset_request.leverage,
+            analyze_asset_request.target_lang
         )
         return {"task_id": task.id}
     except Exception as e:
@@ -125,6 +130,7 @@ async def gainers_analysis_api(request: Request, gainers_analysis_request: Gaine
     try:
         task = analyze_movers_task.delay(
             gainers_analysis_request.token,
+            gainers_analysis_request.target_lang,
             gainers_analysis_request.interval,
             gainers_analysis_request.change_threshold,
             gainers_analysis_request.type,

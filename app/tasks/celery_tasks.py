@@ -57,7 +57,8 @@ def run_backtest_task(
 def analyze_intervals_task(
     asset,
     token,
-    interval
+    interval,
+    target_lang
 ):
     
     logger.info(f"Analyzing intervals for {asset} with token {token} and interval {interval}")
@@ -72,7 +73,8 @@ def analyze_intervals_task(
         analyze_intervals(
             asset,
             token,
-            interval
+            interval,
+            target_lang
         )
     )
     return result
@@ -84,6 +86,7 @@ def analyze_asset_task(
     interval,
     features=None,
     leverage=10,
+    target_lang="en"
 ):
     
     logger.info(f"Analyzing asset {asset} with token {token} and timeframe {interval}")
@@ -100,7 +103,8 @@ def analyze_asset_task(
             asset,
             interval,
             features,
-            leverage
+            leverage,
+            target_lang
         )
     )
     
@@ -109,6 +113,7 @@ def analyze_asset_task(
 @shared_task(queue="trading")
 def analyze_movers_task(
     token,
+    target_lang,
     interval,
     change_threshold=0.05,
     type="gainers",
@@ -126,6 +131,7 @@ def analyze_movers_task(
     result = loop.run_until_complete(
         analyze_movers(
             token,
+            target_lang,
             interval,
             change_threshold,
             type,
