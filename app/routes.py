@@ -95,7 +95,7 @@ async def analyze_intervals_api(request: Request, analyze_request: AnalyzeInterv
         task = analyze_intervals_task.delay(
             analyze_request.asset,
             analyze_request.token,
-            analyze_request.interval
+            analyze_request.interval,
             analyze_request.target_lang
         )
         return {"task_id": task.id}
