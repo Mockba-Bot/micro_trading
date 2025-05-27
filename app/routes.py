@@ -39,7 +39,14 @@ class GainersAnalysisRequest(BaseModel):
     type: str = "gainers"  # Default to "gainers"
     top_n: int = 10  # Optional parameter for top N movers
 
-
+class AnalyzeProbabilityAssetRequest(BaseModel):
+    token: str
+    asset: str
+    timeframe: str
+    features: Optional[List[str]] = None    
+    leverage: int = 10
+    target_lang: str = "en"
+    free_collateral: float = 100
 
 backtest_router = APIRouter()
 status_router = APIRouter()
@@ -139,7 +146,7 @@ async def gainers_analysis_api(request: Request, gainers_analysis_request: Gaine
 
 
 @analyze_asset_probability_router.post("/analyze_probability_asset")
-async def analyze_asset_probability_api(request: Request, analyze_asset_probability_request: AnalyzeAssetRequest):
+async def analyze_asset_probability_api(request: Request, analyze_asset_probability_request: AnalyzeProbabilityAssetRequest):
     """
     Analyze the asset with the given parameters.
     """
@@ -150,7 +157,8 @@ async def analyze_asset_probability_api(request: Request, analyze_asset_probabil
             analyze_asset_probability_request.timeframe,
             analyze_asset_probability_request.features,
             analyze_asset_probability_request.leverage,
-            analyze_asset_probability_request.target_lang
+            analyze_asset_probability_request.target_lang,
+            analyze_asset_probability_request.free_collateral
         )
         return {"task_id": task.id}
     except Exception as e:

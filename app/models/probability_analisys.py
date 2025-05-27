@@ -658,7 +658,7 @@ async def get_funding_rate(symbol):
         return 0.0  # Default neutral rate
 
         
-async def analize_probability_asset(token, asset, interval, features, leverage, target_lang, market_bias='neutral'):
+async def analize_probability_asset(token, asset, interval, features, leverage, target_lang, free_colateral,  market_bias='neutral'):
     print('Getting data for analysis') 
     analysis_translated = None
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
@@ -826,7 +826,7 @@ async def analize_probability_asset(token, asset, interval, features, leverage, 
             
             #--- Generate Professional Prompt ---
             prompt = f"""
-            📈 Advanced Probability Matrix* | {asset} {interval} | {leverage}x
+            📈 Advanced Probability Matrix* | {asset} {interval} | {leverage}x | for a free collateral of ${free_colateral:,.2f}
 
             🔷 Price Action
             - Last Price: ${data['close'].iloc[-1]:,.2f}
@@ -888,8 +888,7 @@ async def analize_probability_asset(token, asset, interval, features, leverage, 
                             "content": prompt
                         }
                     ],
-                    "temperature": 0.2,
-                    "max_tokens": 800    # Prevent rambling
+                    "temperature": 0.2
                 },
                 headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
             )

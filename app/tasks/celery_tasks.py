@@ -144,7 +144,8 @@ def analyze_asset_probability_task(
     interval,
     features=None,
     leverage=10,
-    target_lang="en"
+    target_lang="en",
+    free_collateral=1000
 ):
     
     logger.info(f"Analyzing probability asset {asset} with token {token} and timeframe {interval}")
@@ -162,7 +163,8 @@ def analyze_asset_probability_task(
             interval,
             features,
             leverage,
-            target_lang
+            target_lang,
+            free_collateral
         )
     )
     
