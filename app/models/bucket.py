@@ -3,6 +3,7 @@ import sys
 from dotenv import load_dotenv
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
+import glob
 
 # Load environment variables from the .env file
 load_dotenv(dotenv_path=".env.micro.trading")
@@ -28,8 +29,11 @@ def download_model(bucket_name, key, local_path):
     try:
         # Ensure the directory exists
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        
+        # If the file exists, delete it first
+        if os.path.exists(local_path):
+            os.remove(local_path)
         s3_client.download_file(bucket_name, key, local_path)
+        
         return True
     except NoCredentialsError:
         print("Credentials not available")

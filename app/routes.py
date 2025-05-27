@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from celery.result import AsyncResult
 from app.tasks.celery_app import celery_app
-from app.tasks.celery_tasks import run_backtest_task, analyze_intervals_task, analyze_asset_task, analyze_movers_task
+from app.tasks.celery_tasks import run_backtest_task, analyze_intervals_task, analyze_asset_task, analyze_movers_task, analyze_asset_probability_task
 from typing import List, Optional
 
 class BacktestRequest(BaseModel):
@@ -15,9 +15,6 @@ class BacktestRequest(BaseModel):
     stop_loss_threshold: float = 0.05
     take_profit_threshold: float = 0.001
     features: Optional[List[str]] = None
-    withdraw_percentage: float = 0.7
-    compound_percentage: float = 0.3
-    num_trades_daily: Optional[int] = None
     market_bias: str
 
 class AnalyzeIntervalsRequest(BaseModel):
@@ -42,11 +39,14 @@ class GainersAnalysisRequest(BaseModel):
     type: str = "gainers"  # Default to "gainers"
     top_n: int = 10  # Optional parameter for top N movers
 
+
+
 backtest_router = APIRouter()
 status_router = APIRouter()
 analyze_router = APIRouter()
 analyze_asset_router = APIRouter()
 gainers_analysis_router = APIRouter()
+analyze_asset_probability_router = APIRouter()
 
 @backtest_router.post("/backtest")
 async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
@@ -64,9 +64,6 @@ async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
             backtest_request.stop_loss_threshold,
             backtest_request.take_profit_threshold,
             backtest_request.features,
-            backtest_request.withdraw_percentage,
-            backtest_request.compound_percentage,
-            backtest_request.num_trades_daily,
             backtest_request.market_bias
         )
         return {"task_id": task.id}
@@ -135,6 +132,25 @@ async def gainers_analysis_api(request: Request, gainers_analysis_request: Gaine
             gainers_analysis_request.change_threshold,
             gainers_analysis_request.type,
             gainers_analysis_request.top_n
+        )
+        return {"task_id": task.id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))      
+
+
+@analyze_asset_probability_router.post("/analyze_probability_asset")
+async def analyze_asset_probability_api(request: Request, analyze_asset_probability_request: AnalyzeAssetRequest):
+    """
+    Analyze the asset with the given parameters.
+    """
+    try:
+        task = analyze_asset_probability_task.delay(
+            analyze_asset_probability_request.token,
+            analyze_asset_probability_request.asset,
+            analyze_asset_probability_request.timeframe,
+            analyze_asset_probability_request.features,
+            analyze_asset_probability_request.leverage,
+            analyze_asset_probability_request.target_lang
         )
         return {"task_id": task.id}
     except Exception as e:

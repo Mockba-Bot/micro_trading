@@ -20,6 +20,7 @@ from base64 import urlsafe_b64encode
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import threading
 from deep_translator import GoogleTranslator
+from datetime import datetime, timedelta
 
 # Add the directory containing your modules to the Python path
 sys.path.append('/app')
@@ -62,56 +63,6 @@ class RateLimiter:
                 print(f"⏳ Rate limit reached! Sleeping for {sleep_time:.2f} seconds...")
                 time.sleep(sleep_time)
             self.calls.append(time.time())
-
-# ✅ Initialize Global Rate Limiter
-rate_limiter = RateLimiter(max_calls=10, period=1)
-def fetch_order_book_snapshot(symbol):
-    rate_limiter()  # ✅ Apply global rate limit
-
-    timestamp = str(int(time.time() * 1000))
-    path = f"/v1/orderbook/{symbol}"  # Include query string
-    message = f"{timestamp}GET{path}"
-
-    signature = urlsafe_b64encode(private_key.sign(message.encode())).decode()
-
-    headers = {
-        "orderly-timestamp": timestamp,
-        "orderly-account-id": ORDERLY_ACCOUNT_ID,
-        "orderly-key": ORDERLY_PUBLIC_KEY,
-        "orderly-signature": signature,
-    }
-
-    url = f"{BASE_URL}{path}"
-    response = requests.get(url, headers=headers)
-
-    if response.status_code != 200:
-        print(f"❌ Error fetching data for {symbol}: {response.json()}")
-        return None
-
-    data = response.json().get("data", {})
-    if not data:
-        return None
-
-    asks = data.get("asks", [])
-    bids = data.get("bids", [])
-
-    # Create DataFrames
-    df_asks = pd.DataFrame(asks)
-    df_bids = pd.DataFrame(bids)
-
-    # Add a side column
-    if not df_asks.empty:
-        df_asks["side"] = "ask"
-    if not df_bids.empty:
-        df_bids["side"] = "bid"
-
-    # Combine both DataFrames
-    df_orderbook = pd.concat([df_bids, df_asks], ignore_index=True)
-
-    # Optional: Sort by price descending if you want
-    df_orderbook = df_orderbook.sort_values(by="price", ascending=False).reset_index(drop=True)
-
-    return df_orderbook
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -165,11 +116,11 @@ async def send_bot_message(token, message):
 
 
 # ✅ Fetch historical Orderly data with global rate limiting
+rate_limiter = RateLimiter(max_calls=8, period=1)  # 8 calls per second
 def fetch_historical_orderly(symbol, interval):
     rate_limiter()
-
     timestamp = str(int(time.time() * 1000))
-    params = {"symbol": symbol, "type": interval, "limit": 100}  # Get exactly 100 candles
+    params = {"symbol": symbol, "type": interval, "limit": 1000}  # Get exactly 100 candles
     path = "/v1/kline"
     query = f"?{urllib.parse.urlencode(params)}"
     message = f"{timestamp}GET{path}{query}"
@@ -184,7 +135,6 @@ def fetch_historical_orderly(symbol, interval):
 
     url = f"{BASE_URL}{path}{query}"
     response = requests.get(url, headers=headers)
-
     if response.status_code != 200:
         print(f"❌ Error fetching data for {symbol} {interval}: {response.json()}")
         return None
@@ -201,8 +151,7 @@ def fetch_historical_orderly(symbol, interval):
         df = df[["open", "high", "low", "close", "volume"]]
         df = df[~df.index.duplicated(keep='first')]  # Remove duplicates
         
-        # Sort by date (newest first) and return last 100
-        return df.sort_index(ascending=True).head(100)
+        return df.sort_index(ascending=True).head(1000)
     
     return None
 
@@ -538,38 +487,324 @@ def format_analysis_for_telegram(cached_data):
         print(f"Error formatting cached data: {e}")
         return None
 
+class ProbabilityEngine:
+    def __init__(self, asset_info):
+        self.base_imr = asset_info['base_imr']  # Initial Margin (e.g., 10%)
+        self.base_mmr = asset_info['base_mmr']  # Maintenance Margin (e.g., 5%)
+        self.liq_fee = asset_info['std_liquidation_fee']  # Liquidation penalty
+        
+    def calculate_scenarios(self, data, lookahead=5):
+        """Bidirectional scenario probabilities (0.5% moves)"""
+        # Long scenario: 0.5% up before 0.25% down
+        data['long_success'] = (
+            (data['close'].rolling(lookahead).max() / data['close'] >= 1.005) & 
+            (data['close'].rolling(lookahead).min() / data['close'] > 0.9975
+        ).astype(int))
+        
+        # Short scenario: 0.5% down before 0.25% up
+        data['short_success'] = (
+            (data['close'].rolling(lookahead).min() / data['close'] <= 0.995) & 
+            (data['close'].rolling(lookahead).max() / data['close'] < 1.0025
+        ).astype(int))
+        return data
+
+    def dynamic_kelly(self, prob_win, reward_risk_ratio, leverage, funding_rate=0):
+        """Perpetual-optimized Kelly sizing with leverage constraints
+        Args:
+            prob_win: Probability of winning the trade (0-1)
+            reward_risk_ratio: Expected reward/risk ratio (e.g. 2.0 for 2:1)
+            leverage: User's maximum allowed leverage
+            funding_rate: Current funding rate (optional)
+        Returns:
+            Optimal position size as fraction of capital (0-1)
+        """
+        # Base Kelly formula
+        raw_kelly = (prob_win * (reward_risk_ratio + 1) - 1) / reward_risk_ratio
+        
+        # Funding rate adjustment
+        if funding_rate < 0:
+            raw_kelly *= (1 + funding_rate/0.02)  # Reduce size in negative funding
+        
+        # Exchange maximum leverage based on IMR
+        exchange_max_leverage = 1 / self.base_imr
+        
+        # Apply three constraints:
+        return min(
+            max(raw_kelly, 0.01),  # Minimum 1% position
+            leverage,               # User's selected max leverage
+            exchange_max_leverage * 0.8  # 80% of exchange max
+        )
+
+    def monte_carlo_liquidation(self, price, atr, position_size, leverage, n_sims=2000):
+        """Simulate liquidation risk under volatility shocks with position size impact
+        
+        Args:
+            price: Current asset price
+            atr: Average True Range (volatility measure)
+            position_size: Fraction of capital being risked (0-1)
+            leverage: Account leverage multiplier
+            n_sims: Number of Monte Carlo simulations
+            
+        Returns:
+            Probability of liquidation (0-1)
+        """
+        # Convert position size to effective exposure
+        exposure_multiplier = 1 + (position_size * 2)  # [1-3] range
+        
+        # Adjusted volatility based on position size
+        daily_vol = (atr / price) * exposure_multiplier
+        
+        # Liquidation price calculation
+        liq_price = price * (1 - (self.base_imr - self.base_mmr)/leverage)
+        
+        # Monte Carlo simulation with volatility clustering
+        shocks = np.random.normal(0, daily_vol, n_sims)
+        price_paths = price * (1 + shocks)
+        
+        # Count liquidation events
+        liq_events = np.sum(price_paths <= liq_price)
+        
+        return min(liq_events / n_sims, 0.99)  # Cap at 99% for numerical stability
+
+    def funding_adjustment(self, prob, funding_rate, cap=0.02):
+        """Adjust probability based on funding regime"""
+        impact = abs(funding_rate) / cap  # Normalized 0-1
+        return prob * (1 - impact) if funding_rate < 0 else prob * (1 + 0.3*impact)
+    
+    def calculate_advanced_scenarios(self, data, lookahead=5):
+        """Calculate 6 key trading scenarios with varying targets"""
+        scenarios = {
+            # Long scenarios
+            'long_03': (data['close'].rolling(lookahead).max() / data['close'] >= 1.003),
+            'long_05': (data['close'].rolling(lookahead).max() / data['close'] >= 1.005),
+            'long_10': (data['close'].rolling(lookahead).max() / data['close'] >= 1.01),
+            'long_15': (data['close'].rolling(lookahead).max() / data['close'] >= 1.015),
+            'long_20': (data['close'].rolling(lookahead).max() / data['close'] >= 1.02),
+            
+            # Short scenarios
+            'short_03': (data['close'].rolling(lookahead).min() / data['close'] <= 0.997),
+            'short_05': (data['close'].rolling(lookahead).min() / data['close'] <= 0.995),
+            'short_10': (data['close'].rolling(lookahead).min() / data['close'] <= 0.99),
+            'short_15': (data['close'].rolling(lookahead).min() / data['close'] <= 0.985),
+            'short_20': (data['close'].rolling(lookahead).min() / data['close'] <= 0.98),
+            
+            # Stop-hit scenarios
+            'long_stop': (data['close'].rolling(lookahead).min() / data['close'] <= 0.9925),
+            'short_stop': (data['close'].rolling(lookahead).max() / data['close'] >= 1.0075)
+        }
+        
+        # Calculate conditional probabilities
+        data['long_03_prob'] = scenarios['long_03'].astype(int)
+        data['long_05_prob'] = scenarios['long_05'].astype(int)
+        data['long_10_prob'] = (scenarios['long_10'] & ~scenarios['long_stop']).astype(int)
+        data['long_15_prob'] = (scenarios['long_15'] & ~scenarios['long_stop']).astype(int)
+        data['long_20_prob'] = (scenarios['long_20'] & ~scenarios['long_stop']).astype(int)
+        
+        data['short_03_prob'] = scenarios['short_03'].astype(int)
+        data['short_05_prob'] = scenarios['short_05'].astype(int)
+        data['short_10_prob'] = (scenarios['short_10'] & ~scenarios['short_stop']).astype(int)
+        data['short_15_prob'] = (scenarios['short_15'] & ~scenarios['short_stop']).astype(int)
+        data['short_20_prob'] = (scenarios['short_20'] & ~scenarios['short_stop']).astype(int)
+        
+        return data
+    
+    def calculate_confidence(self, proba_df, current_funding):
+        """5-tier confidence system with funding adjustment"""
+        raw_confidence = proba_df.max(axis=1).iloc[-1]
+        
+        # Funding rate impact (reduce confidence in adverse funding)
+        funding_impact = 1 - min(abs(current_funding)/0.02, 0.3)  # Max 30% reduction
+        adjusted_confidence = raw_confidence * funding_impact
+        
+        # Classification
+        if adjusted_confidence > 0.8:
+            return "🔥 Very High", int(adjusted_confidence*100)
+        elif adjusted_confidence > 0.7:
+            return "✅ High", int(adjusted_confidence*100)
+        elif adjusted_confidence > 0.6:
+            return "⚠️ Moderate", int(adjusted_confidence*100)
+        elif adjusted_confidence > 0.5:
+            return "🛑 Low", int(adjusted_confidence*100)
+        else:
+            return "❌ Very Low", int(adjusted_confidence*100)
 
 
-async def analize_asset(token, asset, interval, features, leverage, target_lang, market_bias='neutral'):
+async def get_funding_rate(symbol):
+    """Fetch current funding rate for perpetual contract"""
+    cache_key = f"funding_rate:{symbol}"
+    cache_ttl = 300  # 5 minutes
+    
+    # Check Redis cache first
+    if redis_client:
+        cached_rate = await redis_client.get(cache_key)
+        if cached_rate:
+            return float(cached_rate)
+    
+    # API request with rate limiting
+    rate_limiter()
+    url = f"{BASE_URL}/v1/public/funding_rate/{symbol}"
+    response = requests.get(url)
+    
+    if response.status_code == 200:
+        funding_rate = float(response.json()['data']['est_funding_rate'])
+        
+        # Cache the result
+        if redis_client:
+            await redis_client.setex(cache_key, cache_ttl, str(funding_rate))
+            
+        return funding_rate
+    else:
+        print(f"⚠️ Failed to fetch funding rate: {response.text}")
+        return 0.0  # Default neutral rate
+
+        
+async def analize_probability_asset(token, asset, interval, features, leverage, target_lang, market_bias='neutral'):
     print('Getting data for analysis') 
     analysis_translated = None
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
-    
-
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
         try:
+            # --- Data Preparation ---
             data = fetch_historical_orderly(asset, interval)
+            if data is None or data.empty:
+               print(f"❌ No historical data returned for {asset} {interval}")
+               return None
+                
+            asset_info = await fetch_asset_info(asset)
+            prob_engine = ProbabilityEngine(asset_info)
+            current_funding = await get_funding_rate(asset)
             
-            # --- Step 1: Analyze data and prepare for prediction ---
+            # --- Model Predictions ---
             model_metadata = joblib.load(local_model_path)
             model = model_metadata["model"]
             used_features = model_metadata.get("used_features", [])
-
-            # Add missing features to the dataset
+            # Ensure essential features are present
+            for f in ["rsi_14", "macd", "macd_signal"]:
+                if f not in features:
+                    used_features.append(f)
+            
+            # Add missing indicators
             missing_features = [f for f in used_features if f not in data.columns]
             if missing_features:
                 data = add_indicators(data, missing_features)
 
-            # Ensure dataset contains only trained features and in correct order
+            # Also make sure to handle cases where the indicator calculation might fail:
+            rsi_value = data['rsi_14'].iloc[-1] if 'RSI_14' in data.columns else 'N/A'
+            macd_status = ('Bullish' if data['macd'].iloc[-1] > data['macd_signal'].iloc[-1] 
+                        else 'Bearish') if all(col in data.columns for col in ['macd', 'macd_signal']) else 'N/A'      
+            
             data = data[used_features].dropna().copy()
-
-            # --- Predict class probabilities
+            
+            # --- Core Predictions ---
             y_proba = model.predict_proba(data[features])
             proba_df = pd.DataFrame(y_proba, columns=model.classes_)
-
-            # --- Generate predictions ---
+            
+            # # --- Advanced Scenario Analysis ---
+            data = prob_engine.calculate_advanced_scenarios(data)
+            
+            # Calculate all scenario probabilities
+            scenario_probs = {
+                'long': {
+                    '0.3%': data['long_03_prob'].mean(),
+                    '0.5%': data['long_05_prob'].mean(),
+                    '1.0%': data['long_10_prob'].mean(),
+                    '1.5%': data['long_15_prob'].mean(),
+                    '2.0%': data['long_20_prob'].mean()
+                },
+                'short': {
+                    '0.3%': data['short_03_prob'].mean(),
+                    '0.5%': data['short_05_prob'].mean(),
+                    '1.0%': data['short_10_prob'].mean(),
+                    '1.5%': data['short_15_prob'].mean(),
+                    '2.0%': data['short_20_prob'].mean()
+                }
+            }
+            
+            # --- Dynamic Kelly Sizing ---
+            kelly_sizes = {
+                'long': {
+                    '0.3%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['long']['0.3%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=1.5,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    ),
+                    '0.5%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['long']['0.5%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=2.0,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    ),
+                    '1.0%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['long']['1.0%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=3.0,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    ),
+                    '1.5%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['long']['1.5%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=4.0,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    ),
+                    '2.0%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['long']['2.0%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=5.0,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    )
+                },
+                'short': {
+                    '0.3%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['short']['0.3%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=1.5,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    ),
+                    '0.5%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['short']['0.5%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=2.0,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    ),
+                    '1.0%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['short']['1.0%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=3.0,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    ),
+                    '1.5%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['short']['1.5%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=4.0,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    ),
+                    '2.0%': prob_engine.dynamic_kelly(
+                        prob_win=scenario_probs['short']['2.0%'],  # Changed from prob to prob_win
+                        reward_risk_ratio=5.0,
+                        leverage=leverage,
+                        funding_rate=current_funding
+                    )
+                }
+            }
+            
+            # --- Confidence Calculation ---
+            confidence_level, confidence_score = prob_engine.calculate_confidence(proba_df, current_funding)
+            
+            # --- Risk Assessment ---
+            liq_risk = prob_engine.monte_carlo_liquidation(
+                price=data['close'].iloc[-1],
+                atr=data['atr_14'].iloc[-1],
+                position_size=max(
+                    max(kelly_sizes['long'].values()),
+                    max(kelly_sizes['short'].values())
+                ),
+                leverage=leverage
+            )
+            
+            # --- Signal Generation ---
             target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
             if market_bias == 'bullish':
                 target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
@@ -578,105 +813,67 @@ async def analize_asset(token, asset, interval, features, leverage, target_lang,
 
             n_samples = len(proba_df)
             target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
-
-            y_custom = np.zeros(n_samples, dtype=int)
+            
+            y_custom = np.zeros(len(proba_df), dtype=int)
             for cls in [-1, 1]:
                 top_indices = proba_df[cls].nlargest(target_counts[cls]).index
                 y_custom[top_indices] = cls
-
+            
             data['predicted'] = y_custom
-            data['close_pct_change'] = data['close'].pct_change()
-            
-            # Get current market data
-            current_price = data['close'].iloc[-1]
-            last_10_predictions = data['predicted'].tail(10).tolist()
             current_prediction = data['predicted'].iloc[-1]
-            confidence_score = int(proba_df.max(axis=1).iloc[-1] * 100)
-            confidence_level = "High" if confidence_score > 70 else "Medium" if confidence_score > 50 else "Low"
-
-            # --- Order Book Analysis ---
-            order_book_snapshot = fetch_order_book_snapshot(asset)
-            order_book_snapshot_df = pd.DataFrame(order_book_snapshot)
+            #store data as csv file
+            # data.to_csv(f'temp/{asset}_{interval}_data.csv', index=False)
             
-            # Prepare data for API
-            data_json = json.dumps(data.tail(100).to_dict(orient='records'))
-            order_book_snapshot_json = json.dumps(order_book_snapshot_df.to_dict(orient='records'))
-
-            # --- Generate Professional Prompt ---
+            #--- Generate Professional Prompt ---
             prompt = f"""
-            **Task:** Generate a professional trading analysis for {asset} {interval} with {leverage}x leverage in the exact format specified below and optimize for Telegram.
+            📈 Advanced Probability Matrix* | {asset} {interval} | {leverage}x
 
-            ### Required Format:
-            [Asset/Timeframe] Technical Analysis - {get_strategy_name(interval, features)}
-            🔹 Current Price: {current_price}
-            🔸 Market Phase: [trending/consolidating/reversing]
-            🔸 Last Signals: {last_10_predictions} → Current: {current_prediction} ({confidence_level} confidence)
-            🔸 Active Indicators: {features}
+            🔷 Price Action
+            - Last Price: ${data['close'].iloc[-1]:,.2f}
+            - Support: ${data['low'].tail(10).min():,.2f}
+            - Resistance: ${data['high'].tail(10).max():,.2f}
 
-            📊 Key Indicators (Using: {get_strategy_name(interval, features)})
-            - [Indicator from {features}]: [value] → [interpretation]
-            - [Indicator from {features}]: [value] → [interpretation]
+            🎯 Probability Matrix
+            LONG Targets:
+            0.3%: {scenario_probs['long']['0.3%']:.1%} → {kelly_sizes['long']['0.3%']:.2f}x 
+            0.5%: {scenario_probs['long']['0.5%']:.1%} → {kelly_sizes['long']['0.5%']:.2f}x
+            1.0%: {scenario_probs['long']['1.0%']:.1%} → {kelly_sizes['long']['1.0%']:.2f}x
+            1.5%: {scenario_probs['long']['1.5%']:.1%} → {kelly_sizes['long']['1.5%']:.2f}x
+            2.0%: {scenario_probs['long']['2.0%']:.1%} → {kelly_sizes['long']['2.0%']:.2f}x
 
-            📈 Trend Analysis (Based on {[ind for ind in features if 'ema' in ind or 'ma' in ind]})
-            - Direction: [trend_direction] ([strength])
-            - MA Cross: [ema_cross_status]
-            - Volatility: [volatility_level] (using {[ind for ind in features if 'atr' in ind or 'std' in ind]})
+            SHORT Targets:
+            0.3%: {scenario_probs['short']['0.3%']:.1%} → {kelly_sizes['short']['0.3%']:.2f}x
+            0.5%: {scenario_probs['short']['0.5%']:.1%} → {kelly_sizes['short']['0.5%']:.2f}x
+            1.0%: {scenario_probs['short']['1.0%']:.1%} → {kelly_sizes['short']['1.0%']:.2f}x
+            1.5%: {scenario_probs['short']['1.5%']:.1%} → {kelly_sizes['short']['1.5%']:.2f}x
+            2.0%: {scenario_probs['short']['2.0%']:.1%} → {kelly_sizes['short']['2.0%']:.2f}x
 
-            🎯 Critical Levels
-            - Support: [level1], [level2]
-            - Resistance: [level1], [level2]
+            ⚡ Signal: {'🟢 LONG' if current_prediction == 1 else '🔴 SHORT' if current_prediction == -1 else '🟡 HOLD'} 
+            📊 Confidence: {confidence_score}%
+            🔄 Market Bias: {market_bias.upper()}
 
-            ⚡ {leverage}x Trading Signals ({get_strategy_name(interval, features)} Strategy)
+            ⚠️ Risk Assessment
+            - Liquidation: {liq_risk:.1%}
+            - Funding: {current_funding*100:+.2f}%
+            - Max Safe Leverage: {min(1/asset_info['base_imr'], leverage):.1f}x
 
-            🔵 LONG Setup (Bullish)
-            - Trigger: [condition using {features}]
-            - Entry Zone: [entry_price_range]
-            - TP: [target_price] (+[target_percent]%)
-            - SL: [stop_price] (-[stop_percent]%)
-            - Confidence: [high/medium/low]
+            💎 Strategic Recommendation
+            {"🚀 STRONG LONG" if scenario_probs['long']['1.0%'] > 0.7 else 
+            "🎯 PREFER SHORTS" if scenario_probs['short']['0.5%'] > 0.7 else 
+            "🛑 WAIT FOR CONFIRMATION"}
 
-            🔴 SHORT Setup (Bearish) 
-            - Trigger: [condition using {features}]
-            - Entry Zone: [entry_price_range]
-            - TP: [target_price] (-[target_percent]%)
-            - SL: [stop_price] (+[stop_percent]%) 
-            - Confidence: [high/medium/low]
+            📌 Key Conditions
+            - RSI: {rsi_value if isinstance(rsi_value, (int, float)) else rsi_value} | MACD: {macd_status}
+            - Volume: {data['volume'].iloc[-1]/1000:.1f}K | ATR: {data['atr_14'].iloc[-1]:.2f}
+            - Confidence: {confidence_level} ({confidence_score}%)
 
-            🟡 HOLD Recommendation (Neutral)
-            - Conditions: [market_conditions_for_holding]
-            - Duration: [expected_hold_timeframe]
-            - Next Trigger: [key_level_for_action]
-
-            💰 Leverage Math
-            - Profit Potential: {leverage}×[target_percent]% move = +[potential_profit]%
-            - Risk Exposure: {leverage}×[stop_percent]% move = -[potential_loss]%
-            - Position Size: ≤[recommended_percent]% of capital
-
-            ⚠️ Risk Alert
-            - Immediate Risk: [key_risk_factor]
-            - Liquidation Warning: [nearest_liquidation_zone]
-            - Alternative Strategy: [safer_approach_if_applicable]
-
-            📌 FINAL RECOMMENDATION
-            🎯 Best Action: [LONG/SHORT/HOLD] 
-            🔍 Reason: [2-3_sentence_rationale]
-            ⏱️ Valid Until: [timeframe_or_key_level]
-            📊 Confidence: [high/medium/low]
-
-            ✅ Strengths: [bullish_factors] 
-            ⛔ Weaknesses: [bearish_factors]
-            🔮 Next Decision Point: [key_level/time_event]
-
-            (Not financial advice - DYOR)
-
-            ### Analysis Data:
-            1. Price Action: {data_json}
-            2. Order Book: {order_book_snapshot_json}
-            3. Model Confidence: {confidence_score}/100
-            4. Volume Analysis: [volume_commentary]
-            5. Liquidity: [liquidity_assessment]
+            🔔 Final Notes
+            • Data: {len(data)} samples | Next update: {interval}
+            • Max Position: {min(max(kelly_sizes['long'].values()) + max(kelly_sizes['short'].values()), leverage):.1f}/{leverage}x
+            • NOT FINANCIAL ADVICE
             """
-            # Send to DeepSeek API
+            
+            # --- API Call ---
             response = requests.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 json={
@@ -684,27 +881,27 @@ async def analize_asset(token, asset, interval, features, leverage, target_lang,
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are a professional trading analyst specializing in leveraged trading. Generate concise reports in plain text with clear sections. Use emojis for visual organization but no markdown formatting. All numbers to 2 decimals. Focus on leverage-specific risks and opportunities."
+                            "content": "You are a hedge fund quant analyst. Provide: 1) Exact entry/exit prices 2) Position sizing adjustments 3) Real-time risk alerts"
                         },
                         {
                             "role": "user",
                             "content": prompt
                         }
                     ],
-                    "temperature": 0.3
+                    "temperature": 0.2,
+                    "max_tokens": 800    # Prevent rambling
                 },
                 headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
             )
-
+            
             if response.status_code == 200:
                 analysis = response.json()["choices"][0]["message"]["content"]
-                analysis_translated = translate(analysis, target_lang)
+                analysis_translated = translate(analysis, target_lang).replace("###", "").strip()
                 await send_bot_message(token, analysis_translated)
-            else:
-                print(f"Error: {response.status_code}, {response.text}")
+                print("✅ Analysis sent successfully!")
           
         finally:
-            if os.path.exists(local_model_path):
-                os.remove(local_model_path)
+             if os.path.exists(local_model_path):
+                 os.remove(local_model_path)
 
     return analysis_translated
