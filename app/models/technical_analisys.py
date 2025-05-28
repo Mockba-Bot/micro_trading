@@ -589,7 +589,7 @@ async def analize_asset(token, asset, interval, features, leverage, target_lang,
             
             # Get current market data
             current_price = data['close'].iloc[-1]
-            last_10_predictions = data['predicted'].tail(10).tolist()
+            last_3_predictions = data['predicted'].tail(3).tolist()
             current_prediction = data['predicted'].iloc[-1]
             confidence_score = int(proba_df.max(axis=1).iloc[-1] * 100)
             confidence_level = "High" if confidence_score > 70 else "Medium" if confidence_score > 50 else "Low"
@@ -610,7 +610,7 @@ async def analize_asset(token, asset, interval, features, leverage, target_lang,
             [Asset/Timeframe] Technical Analysis - {get_strategy_name(interval, features)}
             🔹 Current Price: {current_price}
             🔸 Market Phase: [trending/consolidating/reversing]
-            🔸 Last Signals: {last_10_predictions} → Current: {current_prediction} ({confidence_level} confidence)
+            🔸 Last Signals: {last_3_predictions} → Current: {current_prediction} ({confidence_level} confidence)
             🔸 Active Indicators: {features}
 
             📊 Key Indicators (Using: {get_strategy_name(interval, features)})
