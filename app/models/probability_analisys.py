@@ -865,7 +865,7 @@ async def analize_probability_asset(token, asset, interval, features, leverage, 
             🔔 Final Notes
             • Data: {len(data)} samples | Next update: {interval}
             • Max Position: {min(max(kelly_sizes['long'].values()) + max(kelly_sizes['short'].values()), leverage):.1f}/{leverage}x
-            • NOT FINANCIAL ADVICE
+            • NOT FINANCIAL ADVICE, DYOR
             """
             
             # --- API Call ---
@@ -883,7 +883,7 @@ async def analize_probability_asset(token, asset, interval, features, leverage, 
                             "content": prompt
                         }
                     ],
-                    "temperature": 0.3
+                    "temperature": 0.2
                 },
                 headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
             )
