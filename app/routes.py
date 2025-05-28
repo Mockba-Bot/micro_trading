@@ -127,4 +127,4 @@ async def analyze_asset_probability_api(request: Request, analyze_asset_probabil
         )
         return {"task_id": task.id}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))          
+        raise HTTPException(status_code=500, detail=str(e))       

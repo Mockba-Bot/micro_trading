@@ -1,8 +1,9 @@
 import asyncio
 from celery import shared_task
+from celery.result import AsyncResult
 from app.models.elliot_waves import analyze_intervals
 from app.models.technical_analisys import analize_asset
-from app.models.gainers_analysis import analyze_movers
+from app.models.gainers_analysis import analyze_movements
 from app.models.probability_analisys import analize_probability_asset
 import logging
 
@@ -84,7 +85,7 @@ def analyze_movers_task(
         asyncio.set_event_loop(loop)
     
     result = loop.run_until_complete(
-        analyze_movers(
+        analyze_movements(
             token,
             target_lang,
             interval,
@@ -129,7 +130,6 @@ def analyze_asset_probability_task(
     )
     
     return result
-
 
 # @shared_task(queue="trading")
 # def run_trader():
