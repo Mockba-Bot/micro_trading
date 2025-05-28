@@ -77,16 +77,11 @@ load_dotenv(dotenv_path=".env.micro.trading")
 BUCKET_NAME = os.getenv("BUCKET_NAME")  # Your bucket name
 MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")  # Your micro central URL
 
-def translate(text, token):
-    """Translate text to the target language using GoogleTranslator."""
-    response = requests.get(f"{MICRO_CENTRAL_URL}/tlogin/{token}")
-    if response.status_code == 200:
-        user_data = response.json()
-        target_lang = user_data.get('language', 'en')
-        if target_lang == 'en':
-            return text
-        return GoogleTranslator(source='auto', target=target_lang).translate(text)
-    return text  # Return original text if translation fails
+def translate(text, target_lang):
+    if target_lang == 'en':
+        return text  # Return original text if translation fails
+    else:
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)  
 
 
 # Initialize Redis connection

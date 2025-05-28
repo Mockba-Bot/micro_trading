@@ -84,7 +84,10 @@ class RateLimiter:
 
 # Translate function to convert text to the target language
 def translate(text, target_lang):
-        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    if target_lang == 'en':
+        return text  # Return original text if translation fails
+    else:
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)  
 
 # Send bot message function
 async def send_bot_message(token, message, file_path=None):

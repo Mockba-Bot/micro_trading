@@ -41,7 +41,10 @@ MAX_WORKERS = int(os.getenv("MAX_WORKERS", 10))
 DEEP_SEEK_API_KEY = os.getenv("DEEP_SEEK_API_KEY")
 
 def translate(text, target_lang):
-        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    if target_lang == 'en':
+        return text  # Return original text if translation fails
+    else:
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)  
 
 if not ORDERLY_SECRET or not ORDERLY_PUBLIC_KEY:
     raise ValueError("❌ ORDERLY_SECRET or ORDERLY_PUBLIC_KEY environment variables are not set!")

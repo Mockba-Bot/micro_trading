@@ -2,20 +2,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from celery.result import AsyncResult
 from app.tasks.celery_app import celery_app
-from app.tasks.celery_tasks import run_backtest_task, analyze_intervals_task, analyze_asset_task, analyze_movers_task, analyze_asset_probability_task
+from app.tasks.celery_tasks import  analyze_intervals_task, analyze_asset_task, analyze_movers_task, analyze_asset_probability_task
 from typing import List, Optional
-
-class BacktestRequest(BaseModel):
-    asset: str
-    timeframe: str
-    token: str
-    values: str
-    free_collateral: float = 100
-    position_size: float = 10000
-    stop_loss_threshold: float = 0.05
-    take_profit_threshold: float = 0.001
-    features: Optional[List[str]] = None
-    market_bias: str
 
 class AnalyzeIntervalsRequest(BaseModel):
     asset: str
@@ -48,34 +36,11 @@ class AnalyzeProbabilityAssetRequest(BaseModel):
     target_lang: str = "en"
     free_collateral: float = 100
 
-backtest_router = APIRouter()
 status_router = APIRouter()
 analyze_router = APIRouter()
 analyze_asset_router = APIRouter()
 gainers_analysis_router = APIRouter()
 analyze_asset_probability_router = APIRouter()
-
-@backtest_router.post("/backtest")
-async def run_backtest_api(request: Request, backtest_request: BacktestRequest):
-    """
-    Run the backtest with the provided parameters.
-    """
-    try:
-        task = run_backtest_task.delay(
-            backtest_request.asset,
-            backtest_request.timeframe,
-            backtest_request.token,
-            backtest_request.values,
-            backtest_request.free_collateral,
-            backtest_request.position_size,
-            backtest_request.stop_loss_threshold,
-            backtest_request.take_profit_threshold,
-            backtest_request.features,
-            backtest_request.market_bias
-        )
-        return {"task_id": task.id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @status_router.get("/status/{task_id}")
 async def get_task_status(task_id: str):

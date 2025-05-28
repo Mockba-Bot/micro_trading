@@ -1,6 +1,5 @@
 import asyncio
 from celery import shared_task
-from app.models.backtest import run_backtest
 from app.models.elliot_waves import analyze_intervals
 from app.models.technical_analisys import analize_asset
 from app.models.gainers_analysis import analyze_movers
@@ -8,45 +7,6 @@ from app.models.probability_analisys import analize_probability_asset
 import logging
 
 logger = logging.getLogger(__name__)
-
-@shared_task(queue="trading")
-def run_backtest_task(
-      asset
-    , timeframe
-    , token
-    , values
-    , free_collateral=100
-    , position_size=10000
-    , stop_loss_threshold=0.05
-    , take_profit_threshold=0.001
-    , features=None
-    , market_bias="neutral"
-    ):
-    
-    logger.info(f"Running backtest for {asset} with timeframe {timeframe}")
-    
-    # ✅ Fix: Use `asyncio.get_event_loop()` instead of `asyncio.run()`
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    result = loop.run_until_complete(
-        run_backtest(
-            asset, 
-            timeframe, 
-            token, 
-            values, 
-            free_collateral, 
-            position_size,
-            stop_loss_threshold, 
-            take_profit_threshold,
-            features,
-            market_bias
-        )
-    )
-    
-    return result
 
 @shared_task(queue="trading")
 def analyze_intervals_task(
