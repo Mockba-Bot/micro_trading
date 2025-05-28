@@ -1,7 +1,7 @@
 import os
 import sys
 from fastapi import FastAPI
-from app.routes import backtest_router, status_router, analyze_router, analyze_asset_router, analyze_asset_probability_router
+from app.routes import status_router, analyze_router, analyze_asset_router, analyze_asset_probability_router
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -12,7 +12,6 @@ app = FastAPI(
 )
 
 # Include the trading routes
-app.include_router(backtest_router, prefix="/api/v1/trading")
 app.include_router(status_router, prefix="/api/v1/trading")
 app.include_router(analyze_router, prefix="/api/v1/trading")
 app.include_router(analyze_asset_router, prefix="/api/v1/trading")
