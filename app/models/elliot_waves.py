@@ -409,7 +409,7 @@ async def analyze_intervals(asset, token, interval, target_lang):
 
         return analysis_translated
     else:
-        return translate(f"❌ Model not found for {asset} {interval}")        
+        return translate(f"❌ Model not found for {asset} {interval}", target_lang)        
     
                
 

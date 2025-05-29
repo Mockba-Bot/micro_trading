@@ -704,4 +704,4 @@ async def analize_asset(token, asset, interval, features, leverage, target_lang,
 
         return analysis_translated
     else:
-        return translate(f"❌ Model not found for {asset} {interval} with features {features}")
+        return translate(f"❌ Model not found for {asset} {interval} with features {features}", target_lang)
