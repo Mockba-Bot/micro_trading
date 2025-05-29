@@ -702,4 +702,6 @@ async def analize_asset(token, asset, interval, features, leverage, target_lang,
             if os.path.exists(local_model_path):
                 os.remove(local_model_path)
 
-    return analysis_translated
+        return analysis_translated
+    else:
+        return translate(f"❌ Model not found for {asset} {interval} with features {features}")

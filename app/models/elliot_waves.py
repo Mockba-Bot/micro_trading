@@ -273,145 +273,145 @@ async def analyze_intervals(asset, token, interval, target_lang):
     local_model_path = f'temp/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
 
 
-    if not download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-        logger.info(f"No model found for {asset} on {interval}.")
-        translated_message = translate(f"No model found for {asset} on {interval}. Contact support.", token)
-        await send_bot_message(token, translated_message)
-        return  # Skip to next interval
+    if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+        try:
+            data = fetch_historical_orderly(asset, interval)
 
-    try:
-        data = fetch_historical_orderly(asset, interval)
+            # Normalize
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            scaled_data = scaler.fit_transform(data['close'].values.reshape(-1, 1))
 
-        # Normalize
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_data = scaler.fit_transform(data['close'].values.reshape(-1, 1))
+            X, Y = create_rf_dataset(scaled_data, look_back)
+            X = X.reshape(X.shape[0], -1)
 
-        X, Y = create_rf_dataset(scaled_data, look_back)
-        X = X.reshape(X.shape[0], -1)
+            model = joblib.load(local_model_path)
+            predictions = model.predict(X)
 
-        model = joblib.load(local_model_path)
-        predictions = model.predict(X)
+            # Predict future prices
+            future_inputs = X[-1].reshape(1, -1)
+            future_predictions = []
+            for _ in range(future_steps):
+                future_price = model.predict(future_inputs)
+                future_predictions.append(future_price[0])
+                future_inputs = np.roll(future_inputs, -1)
+                future_inputs[0, -1] = future_price
 
-        # Predict future prices
-        future_inputs = X[-1].reshape(1, -1)
-        future_predictions = []
-        for _ in range(future_steps):
-            future_price = model.predict(future_inputs)
-            future_predictions.append(future_price[0])
-            future_inputs = np.roll(future_inputs, -1)
-            future_inputs[0, -1] = future_price
+            future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
+            predicted_labels = (predictions > np.mean(predictions)).astype(int)
 
-        future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
-        predicted_labels = (predictions > np.mean(predictions)).astype(int)
+            # --- Step 1: Get data ---
+            data_json = json.dumps(data.to_dict(orient='records'))
+            # --- Step 2: Future prediction ---
+            future_predictions_json = json.dumps(future_predictions.tolist())
+            # print(f"Future predictions: {future_predictions_json}")
+            # --- Step 3: PRedicted labels ---
+            predicted_labels_json = json.dumps(predicted_labels.tolist())
+            # print(f"Predicted labels: {predicted_labels_json}")
 
-        # --- Step 1: Get data ---
-        data_json = json.dumps(data.to_dict(orient='records'))
-        # --- Step 2: Future prediction ---
-        future_predictions_json = json.dumps(future_predictions.tolist())
-        # print(f"Future predictions: {future_predictions_json}")
-        # --- Step 3: PRedicted labels ---
-        predicted_labels_json = json.dumps(predicted_labels.tolist())
-        # print(f"Predicted labels: {predicted_labels_json}")
+            #######################################################################################
+            #######################################################################################
+            # Step 4: Send to DeepSeek API
+            prompt = f"""
+            **Task:** Generate a professional Elliott Wave analysis for {asset} ({interval}) with ML confirmation, optimized for Telegram traders.
 
-        #######################################################################################
-        #######################################################################################
-        # Step 4: Send to DeepSeek API
-        prompt = f"""
-        **Task:** Generate a professional Elliott Wave analysis for {asset} ({interval}) with ML confirmation, optimized for Telegram traders.
+            ###Input Data:
+            1. Price Action:
+            {data_json}
 
-        ###Input Data:
-        1. Price Action:
-        {data_json}
+            2. ML Signals:
+            - Trend: {future_predictions_json}
+            - Confidence: {predicted_labels_json}
 
-        2. ML Signals:
-        - Trend: {future_predictions_json}
-        - Confidence: {predicted_labels_json}
+            ###Analysis Rules:
+            Explanation
+            1 [2-3 sentences explaining the analysis]
 
-        ###Analysis Rules:
-        Explanation
-        1 [2-3 sentences explaining the analysis]
+            2. Wave Validation:
+            - ✅ Valid if:
+                - Wave 2 stays above Wave 1 start
+                - Wave 3 is longest impulse wave
+                - Wave 4 doesn't enter Wave 1 territory
+            - ❌ Invalid if any rule breaks
 
-        2. Wave Validation:
-        - ✅ Valid if:
-            - Wave 2 stays above Wave 1 start
-            - Wave 3 is longest impulse wave
-            - Wave 4 doesn't enter Wave 1 territory
-        - ❌ Invalid if any rule breaks
+            3. ML Integration:
+            - Highlight confidence-weighted conflicts
+            - Flag high-probability reversals
 
-        3. ML Integration:
-        - Highlight confidence-weighted conflicts
-        - Flag high-probability reversals
+            Output Format:
+            🌊 {asset} {interval} | Elliot Waves Analysis
 
-        Output Format:
-        🌊 {asset} {interval} | Elliot Waves Analysis
+            🔍 Pattern Status: 🟢 Valid | 🔴 Invalid  
+            - Wave 1: [Start] → [End]  
+            - Wave 2: Held at [Price] (X% pullback)  
+            - Wave 3: [Current] → [Target]  
+            - Next Phase: [Wave 4/5 or A-B-C]  
 
-        🔍 Pattern Status: 🟢 Valid | 🔴 Invalid  
-        - Wave 1: [Start] → [End]  
-        - Wave 2: Held at [Price] (X% pullback)  
-        - Wave 3: [Current] → [Target]  
-        - Next Phase: [Wave 4/5 or A-B-C]  
+            📊 Key Levels:  
+            - Buy Zone: [Level]  
+            - Take Profit: [Level]  
+            - Stop Loss: [Level]  
 
-        📊 Key Levels:  
-        - Buy Zone: [Level]  
-        - Take Profit: [Level]  
-        - Stop Loss: [Level]  
+            🤖 ML Cross-Check:  
+            - Trend: [Bullish/Bearish] (X% confidence)  
+            - Alert: [None/"Warning: ML contradicts Wave 5"]  
 
-        🤖 ML Cross-Check:  
-        - Trend: [Bullish/Bearish] (X% confidence)  
-        - Alert: [None/"Warning: ML contradicts Wave 5"]  
+            💬 Insight:  
+            "The current wave structure suggests [continuation/reversal] is likely, with ML providing [strong/weak] confirmation. The critical level to watch is [Price], where we expect [description of expected price action]. This creates a [high/medium] probability trading opportunity."
 
-        💬 Insight:  
-        "The current wave structure suggests [continuation/reversal] is likely, with ML providing [strong/weak] confirmation. The critical level to watch is [Price], where we expect [description of expected price action]. This creates a [high/medium] probability trading opportunity."
+            🚀 Final Verdict:  
+            "Based on the wave pattern and ML alignment, the recommended action is to [specific instruction] with defined risk management at [Level]. The next confirmation signal would be [price/condition], expected within [timeframe]."
 
-        🚀 Final Verdict:  
-        "Based on the wave pattern and ML alignment, the recommended action is to [specific instruction] with defined risk management at [Level]. The next confirmation signal would be [price/condition], expected within [timeframe]."
+            Rules:
+            1. No markdown (**, `, ###, etc)
+            2. Use simple dashes (-) for bullets
+            3. Keep decimals consistent (2 places)
+            """
+                    
 
-        Rules:
-        1. No markdown (**, `, ###, etc)
-        2. Use simple dashes (-) for bullets
-        3. Keep decimals consistent (2 places)
-        """
-                
+            # Send to DeepSeek API
+            # For your use case (temperature=0.3):
+            # Optimal for reliable, repeatable technical analysis.
+            # Sacrifices creativity for accuracy and consistency.
+            response = requests.post(
+                "https://api.deepseek.com/v1/chat/completions",  # Verify the correct endpoint
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": 0.3  # Lower = more deterministic
+                },
+                headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
+            )
 
-        # Send to DeepSeek API
-        # For your use case (temperature=0.3):
-        # Optimal for reliable, repeatable technical analysis.
-        # Sacrifices creativity for accuracy and consistency.
-        response = requests.post(
-            "https://api.deepseek.com/v1/chat/completions",  # Verify the correct endpoint
-            json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": 0.3  # Lower = more deterministic
-            },
-            headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
-        )
+            if response.status_code == 200:
+                analysis = response.json()["choices"][0]["message"]["content"]
+                analysis_translated = translate(analysis, target_lang)
+                await send_bot_message(token, analysis_translated)
+                # print(analysis_translated)
+            else:
+                print(f"Error: {response.status_code}, {response.text}")
+        
+        except Exception as e:
+            logger.error(f"Error processing {interval}: {e}")
+            await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))
 
-        if response.status_code == 200:
-            analysis = response.json()["choices"][0]["message"]["content"]
-            analysis_translated = translate(analysis, target_lang)
-            await send_bot_message(token, analysis_translated)
-            # print(analysis_translated)
-        else:
-            print(f"Error: {response.status_code}, {response.text}")
-      
-    except Exception as e:
-        logger.error(f"Error processing {interval}: {e}")
-        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))
+        finally:
+            if os.path.exists(local_model_path):
+                os.remove(local_model_path)   
 
-    finally:
-        if os.path.exists(local_model_path):
-            os.remove(local_model_path)   
-    return analysis_translated                
+        return analysis_translated
+    else:
+        return translate(f"❌ Model not found for {asset} {interval}")        
+    
+               
 
 
 # Example usage
