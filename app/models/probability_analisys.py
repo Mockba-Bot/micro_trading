@@ -883,7 +883,7 @@ async def analize_probability_asset(token, asset, interval, features, leverage, 
                             "content": prompt
                         }
                     ],
-                    "temperature": 0.2
+                    "temperature": 0.3
                 },
                 headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
             )
