@@ -875,20 +875,20 @@ async def analize_probability_asset(token, asset, interval, features, leverage, 
             # --- API Call ---
             response = requests.post(
                 "https://api.deepseek.com/v1/chat/completions",
-                json={
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "As a crypto quant, provide:\n1. Kelly-optimized sizing (show math)\n2. Monte Carlo results (10k sims)\n3. Clear entry/exit triggers\n\nFormat:\n- Tables for risk metrics\n- Confidence intervals\n- Priority-ranked trades\n\nRequired outputs:\n• Optimal position %\n• Liquidation probability\n• CVaR at 95%\n• Fee-adjusted PnL"
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "temperature": 0.2
-                },
+                            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Respond in this exact structure:\n\n📊 DIRECTIONAL EDGE ANALYSIS\n[LONG/SHORT] | Best Target: X.X% Move\n┌─────────┬────────────┬────────────┬────────────┐\n│ Target  │ Win Prob   │ Kelly Size │ Edge       │\n├─────────┼────────────┼────────────┼────────────┤\n│ 0.3%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n│ 0.5%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n└─────────┴────────────┴────────────┴────────────┘\n\n🎯 EXECUTION SUMMARY\n• Preferred Direction: [STRONG LONG/PREFER SHORTS/NEUTRAL]\n• Entry: $XXX-$XXX (Confirm with: [Indicator1+Indicator2])\n• Exit: Take-Profit at X.X% (X.X% position), Stop-Loss at $XXX\n\n⚠️ RISK PROFILE\n• Max Position: X.X% of capital\n• Liquidation Risk: X.X%\n• Funding Impact: ±X.XX%"
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.1
+            },
                 headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
             )
             
