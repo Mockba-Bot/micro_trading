@@ -821,51 +821,55 @@ async def analize_probability_asset(token, asset, interval, features, leverage, 
             
             #--- Generate Professional Prompt ---
             prompt = f"""
-            📈 Advanced Probability Matrix* | {asset} {interval} | {leverage}x | for a free collateral of ${free_colateral:,.2f}
+            🌟 *Advanced Trading Signal - {asset} {interval}* 🌟
+            💰 Free Collateral: ${free_colateral:,.2f} | ⚖️ Leverage: {leverage}x
 
-            🔷 Price Action
-            - Last Price: ${data['close'].iloc[-1]:,.2f}
-            - Support: ${data['low'].tail(10).min():,.2f}
-            - Resistance: ${data['high'].tail(10).max():,.2f}
+            🔷 *Price Action*
+            📈 Last Price: ${data['close'].iloc[-1]:,.2f}
+            🛡️ Support: ${data['low'].tail(10).min():,.2f}
+            🚀 Resistance: ${data['high'].tail(10).max():,.2f}
 
-            🎯 Probability Matrix
-            LONG Targets:
-            0.3%: {scenario_probs['long']['0.3%']:.1%} → {kelly_sizes['long']['0.3%']:.2f}x 
-            0.5%: {scenario_probs['long']['0.5%']:.1%} → {kelly_sizes['long']['0.5%']:.2f}x
-            1.0%: {scenario_probs['long']['1.0%']:.1%} → {kelly_sizes['long']['1.0%']:.2f}x
-            1.5%: {scenario_probs['long']['1.5%']:.1%} → {kelly_sizes['long']['1.5%']:.2f}x
-            2.0%: {scenario_probs['long']['2.0%']:.1%} → {kelly_sizes['long']['2.0%']:.2f}x
+            🎯 *Probability Matrix*
+            👉 *LONG Targets*:
+            0.3% → {scenario_probs['long']['0.3%']:.1%} | 🎯 Size: {kelly_sizes['long']['0.3%']:.2f}x
+            0.5% → {scenario_probs['long']['0.5%']:.1%} | 🎯 Size: {kelly_sizes['long']['0.5%']:.2f}x
+            1.0% → {scenario_probs['long']['1.0%']:.1%} | 🎯 Size: {kelly_sizes['long']['1.0%']:.2f}x
+            1.5% → {scenario_probs['long']['1.5%']:.1%} | 🎯 Size: {kelly_sizes['long']['1.5%']:.2f}x
+            2.0% → {scenario_probs['long']['2.0%']:.1%} | 🎯 Size: {kelly_sizes['long']['2.0%']:.2f}x
 
-            SHORT Targets:
-            0.3%: {scenario_probs['short']['0.3%']:.1%} → {kelly_sizes['short']['0.3%']:.2f}x
-            0.5%: {scenario_probs['short']['0.5%']:.1%} → {kelly_sizes['short']['0.5%']:.2f}x
-            1.0%: {scenario_probs['short']['1.0%']:.1%} → {kelly_sizes['short']['1.0%']:.2f}x
-            1.5%: {scenario_probs['short']['1.5%']:.1%} → {kelly_sizes['short']['1.5%']:.2f}x
-            2.0%: {scenario_probs['short']['2.0%']:.1%} → {kelly_sizes['short']['2.0%']:.2f}x
+            👉 *SHORT Targets*:
+            0.3% → {scenario_probs['short']['0.3%']:.1%} | 🎯 Size: {kelly_sizes['short']['0.3%']:.2f}x
+            0.5% → {scenario_probs['short']['0.5%']:.1%} | 🎯 Size: {kelly_sizes['short']['0.5%']:.2f}x
+            1.0% → {scenario_probs['short']['1.0%']:.1%} | 🎯 Size: {kelly_sizes['short']['1.0%']:.2f}x
+            1.5% → {scenario_probs['short']['1.5%']:.1%} | 🎯 Size: {kelly_sizes['short']['1.5%']:.2f}x
+            2.0% → {scenario_probs['short']['2.0%']:.1%} | 🎯 Size: {kelly_sizes['short']['2.0%']:.2f}x
 
-            ⚡ Signal: {'🟢 LONG' if current_prediction == 1 else '🔴 SHORT' if current_prediction == -1 else '🟡 HOLD'} 
-            📊 Confidence: {confidence_score}%
-            🔄 Market Bias: {market_bias.upper()}
+            ⚡ *Signal*: {'🟢 STRONG LONG' if current_prediction == 1 else '🔴 STRONG SHORT' if current_prediction == -1 else '🟡 NEUTRAL'} 
+            📊 Confidence: {confidence_score}% {'✅ High' if confidence_score > 70 else '⚠️ Medium' if confidence_score > 50 else '❌ Low'}
+            🔄 Market Bias: {market_bias.upper()} {'🐂' if market_bias == 'bullish' else '🐻' if market_bias == 'bearish' else '🦉'}
 
-            ⚠️ Risk Assessment
-            - Liquidation: {liq_risk:.1%}
-            - Funding: {current_funding*100:+.2f}%
-            - Max Safe Leverage: {min(1/asset_info['base_imr'], leverage):.1f}x
-
-            💎 Strategic Recommendation
-            {"🚀 STRONG LONG" if scenario_probs['long']['1.0%'] > 0.7 else 
+            💎 *Strategic Recommendation*
+            {"🚀 AGGRESSIVE LONG" if scenario_probs['long']['1.0%'] > 0.7 else 
             "🎯 PREFER SHORTS" if scenario_probs['short']['0.5%'] > 0.7 else 
-            "🛑 WAIT FOR CONFIRMATION"}
+            "🛑 WAIT FOR BETTER ENTRY"}
 
-            📌 Key Conditions
-            - RSI: {rsi_value if isinstance(rsi_value, (int, float)) else rsi_value} | MACD: {macd_status}
-            - Volume: {data['volume'].iloc[-1]/1000:.1f}K | ATR: {data['atr_14'].iloc[-1]:.2f}
-            - Confidence: {confidence_level} ({confidence_score}%)
+            ⚠️ *Risk Assessment*
+            💀 Liquidation Risk: {liq_risk:.1%} {'(High)' if liq_risk > 0.3 else '(Medium)' if liq_risk > 0.15 else '(Low)'}
+            💸 Funding Rate: {current_funding*100:+.2f}% {'(Costly)' if current_funding > 0.0005 else '(Favorable)' if current_funding < -0.0002 else '(Neutral)'}
+            🛡️ Max Safe Leverage: {min(1/asset_info['base_imr'], leverage):.1f}x
 
-            🔔 Final Notes
-            • Data: {len(data)} samples | Next update: {interval}
-            • Max Position: {min(max(kelly_sizes['long'].values()) + max(kelly_sizes['short'].values()), leverage):.1f}/{leverage}x
-            • NOT FINANCIAL ADVICE, DYOR
+            🔔 *Final Notes*
+            • Next update in: {interval}
+            • Max position: {min(max(kelly_sizes['long'].values()) + max(kelly_sizes['short'].values()), leverage):.1f}x
+            • 📅 Data points: {len(data)} samples
+            • ⚠️ Always use stop-loss!
+
+            💡 *AI Quant Suggestions*:
+            1. Provide exact entry/exit prices with confirmation conditions
+            2. Suggest position sizing adjustments based on probability
+            3. Highlight real-time risk alerts with specific triggers
+            4. Give clear execution priority (which trade to take first)
+            5. Include abort conditions for each scenario
             """
             
             # --- API Call ---
@@ -876,14 +880,14 @@ async def analize_probability_asset(token, asset, interval, features, leverage, 
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are a hedge fund quant analyst. Provide: 1) Exact entry/exit prices 2) Position sizing adjustments 3) Real-time risk alerts"
+                            "content": "As a crypto quant, provide:\n1. Kelly-optimized sizing (show math)\n2. Monte Carlo results (10k sims)\n3. Clear entry/exit triggers\n\nFormat:\n- Tables for risk metrics\n- Confidence intervals\n- Priority-ranked trades\n\nRequired outputs:\n• Optimal position %\n• Liquidation probability\n• CVaR at 95%\n• Fee-adjusted PnL"
                         },
                         {
                             "role": "user",
                             "content": prompt
                         }
                     ],
-                    "temperature": 0.3
+                    "temperature": 0.2
                 },
                 headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
             )
