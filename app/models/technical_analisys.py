@@ -1,4 +1,4 @@
-import aiohttp
+
 import time
 import sys
 import os
@@ -8,13 +8,12 @@ import numpy as np
 import urllib.parse
 from dotenv import load_dotenv
 import joblib  # Library for model serialization
-from datetime import datetime, timedelta
 import requests
 import redis.asyncio as redis
 import logging
 from app.models.bucket import download_model
 import json
-from datetime import datetime, timedelta, timezone
+from sendBotMessage import send_bot_message
 from base58 import b58decode
 from base64 import urlsafe_b64encode
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -140,23 +139,6 @@ try:
 except redis.ConnectionError as e:
     print(f"Redis connection error: {e}")
     redis_client = None
-
-
-async def send_bot_message(token, message):
-    url = f"{MICRO_CENTRAL_URL}/send_notification"
-    payload = {
-        "token": token,
-        "message": message
-    }
-    headers = {
-        "Token": token
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as response:
-            if response.status == 200:
-                return await response.json()
-            else:
-                response.raise_for_status()    
 
 
 # ✅ Fetch historical Orderly data with global rate limiting
@@ -695,6 +677,7 @@ async def analize_asset(token, asset, interval, features, leverage, target_lang,
                 analysis = response.json()["choices"][0]["message"]["content"]
                 analysis_translated = translate(analysis, target_lang)
                 await send_bot_message(token, analysis_translated)
+                print("✅ Analysis sent successfully!")
             else:
                 print(f"Error: {response.status_code}, {response.text}")
           

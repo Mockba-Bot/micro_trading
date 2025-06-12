@@ -14,10 +14,9 @@ import joblib
 from app.models.bucket import download_model
 from deep_translator import GoogleTranslator
 import requests
-import aiohttp
 import redis.asyncio as redis
 import logging
-from datetime import datetime, timedelta, timezone
+from sendBotMessage import send_bot_message
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sklearn.preprocessing import MinMaxScaler
 import threading
@@ -89,23 +88,6 @@ def translate(text, target_lang):
     else:
         return GoogleTranslator(source='auto', target=target_lang).translate(text)  
 
-# Send bot message function
-async def send_bot_message(token, message, file_path=None):
-    url = f"{MICRO_CENTRAL_URL}/send_notification"
-    payload = {
-        "token": token,
-        "message": message,
-        "file_path": file_path
-    }
-    headers = {
-        "Token": token
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as response:
-            if response.status == 200:
-                return await response.json()
-            else:
-                response.raise_for_status()
 
 # ✅ Fetch historical Orderly data with global rate limiting
 rate_limiter = RateLimiter(max_calls=10, period=1)

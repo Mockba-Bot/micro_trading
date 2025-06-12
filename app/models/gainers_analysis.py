@@ -1,11 +1,10 @@
-import aiohttp
 import os
 import time
 import sys
 import requests
 import pandas as pd
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from sendBotMessage import send_bot_message  # Assuming this is the correct import path
 import redis
 import json
 from base58 import b58decode
@@ -211,15 +210,6 @@ async def fetch_and_analyze_movements(token: str, interval: str = '1h', change_t
         logger.error(f"Redis cache error: {e}")
     
     return processed_movements
-
-async def send_bot_message(token: str, message: str):
-    url = f"{MICRO_CENTRAL_URL}/send_notification"
-    payload = {"token": token, "message": message}
-    headers = {"Token": token}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as response:
-            if response.status != 200:
-                logger.error(f"Failed to send message: {await response.text()}")
 
 async def analyze_movements(
     token: str,
