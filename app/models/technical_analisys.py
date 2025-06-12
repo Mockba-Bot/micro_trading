@@ -516,7 +516,6 @@ def format_analysis_for_telegram(cached_data):
         return None
 
 
-
 async def analize_asset(token, asset, interval, features, leverage, target_lang, market_bias='neutral'):
     print('Getting data for analysis') 
     analysis_translated = None
@@ -677,6 +676,7 @@ async def analize_asset(token, asset, interval, features, leverage, target_lang,
                 analysis = response.json()["choices"][0]["message"]["content"]
                 analysis_translated = translate(analysis, target_lang)
                 await send_bot_message(token, analysis_translated)
+                print(f"Message length: {len(analysis_translated)}")
                 print("✅ Analysis sent successfully!")
             else:
                 print(f"Error: {response.status_code}, {response.text}")
