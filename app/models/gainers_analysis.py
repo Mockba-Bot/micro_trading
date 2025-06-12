@@ -4,7 +4,7 @@ import sys
 import requests
 import pandas as pd
 import urllib.parse
-from sendBotMessage import send_bot_message  # Assuming this is the correct import path
+from app.models.sendBotMessage import send_bot_message  # Assuming this is the correct import path
 import redis
 import json
 from base58 import b58decode

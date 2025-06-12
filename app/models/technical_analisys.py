@@ -13,7 +13,7 @@ import redis.asyncio as redis
 import logging
 from app.models.bucket import download_model
 import json
-from sendBotMessage import send_bot_message
+from app.models.sendBotMessage import send_bot_message
 from base58 import b58decode
 from base64 import urlsafe_b64encode
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey

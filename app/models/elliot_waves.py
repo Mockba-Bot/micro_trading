@@ -16,7 +16,7 @@ from deep_translator import GoogleTranslator
 import requests
 import redis.asyncio as redis
 import logging
-from sendBotMessage import send_bot_message
+from app.models.sendBotMessage import send_bot_message
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sklearn.preprocessing import MinMaxScaler
 import threading
