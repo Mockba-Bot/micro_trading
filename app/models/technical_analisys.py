@@ -467,9 +467,9 @@ def format_analysis_for_telegram(cached_data):
 
 async def analize_asset(token, asset, interval, feature, leverage, target_lang, market_bias='neutral'):
     print('Getting data for analysis') 
-    features = get_features_by_indicator("1h", feature)
+    features = get_features_by_indicator(interval, feature)
     analysis_translated = None
-    model_name = feature
+    model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
     

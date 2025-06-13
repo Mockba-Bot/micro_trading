@@ -15,7 +15,7 @@ class AnalyzeAssetRequest(BaseModel):
     token: str
     asset: str
     timeframe: str
-    feature: Optional[List[str]] = None    
+    feature: str 
     leverage: int = 10
     target_lang: str = "en"
 
@@ -31,7 +31,7 @@ class AnalyzeProbabilityAssetRequest(BaseModel):
     token: str
     asset: str
     timeframe: str
-    feature: Optional[List[str]] = None    
+    feature: str  
     leverage: int = 10
     target_lang: str = "en"
     free_collateral: float = 100
