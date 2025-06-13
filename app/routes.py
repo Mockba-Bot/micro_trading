@@ -15,7 +15,7 @@ class AnalyzeAssetRequest(BaseModel):
     token: str
     asset: str
     timeframe: str
-    features: Optional[List[str]] = None    
+    feature: Optional[List[str]] = None    
     leverage: int = 10
     target_lang: str = "en"
 
@@ -31,7 +31,7 @@ class AnalyzeProbabilityAssetRequest(BaseModel):
     token: str
     asset: str
     timeframe: str
-    features: Optional[List[str]] = None    
+    feature: Optional[List[str]] = None    
     leverage: int = 10
     target_lang: str = "en"
     free_collateral: float = 100
@@ -82,7 +82,7 @@ async def analyze_asset_api(request: Request, analyze_asset_request: AnalyzeAsse
             analyze_asset_request.token,
             analyze_asset_request.asset,
             analyze_asset_request.timeframe,
-            analyze_asset_request.features,
+            analyze_asset_request.feature,
             analyze_asset_request.leverage,
             analyze_asset_request.target_lang
         )
@@ -120,7 +120,7 @@ async def analyze_asset_probability_api(request: Request, analyze_asset_probabil
             analyze_asset_probability_request.token,
             analyze_asset_probability_request.asset,
             analyze_asset_probability_request.timeframe,
-            analyze_asset_probability_request.features,
+            analyze_asset_probability_request.feature,
             analyze_asset_probability_request.leverage,
             analyze_asset_probability_request.target_lang,
             analyze_asset_probability_request.free_collateral

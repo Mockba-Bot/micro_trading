@@ -40,7 +40,7 @@ def analyze_asset_task(
     token,
     asset,
     interval,
-    features=None,
+    feature=None,
     leverage=10,
     target_lang="en"
 ):
@@ -58,7 +58,7 @@ def analyze_asset_task(
             token,
             asset,
             interval,
-            features,
+            feature,
             leverage,
             target_lang
         )
@@ -103,7 +103,7 @@ def analyze_asset_probability_task(
     token,
     asset,
     interval,
-    features=None,
+    feature=None,
     leverage=10,
     target_lang="en",
     free_collateral=1000
@@ -122,7 +122,7 @@ def analyze_asset_probability_task(
             token,
             asset,
             interval,
-            features,
+            feature,
             leverage,
             target_lang,
             free_collateral
