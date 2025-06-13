@@ -644,9 +644,10 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
 
             data = prob_engine.calculate_advanced_scenarios(data)
             scenario_probs = {
-                'long': {k: data[f'long_{k.replace(".", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']},
-                'short': {k: data[f'short_{k.replace(".", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']}
+                'long': {k: data[f'long_{k.replace(".", "").replace("%", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']},
+                'short': {k: data[f'short_{k.replace(".", "").replace("%", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']}
             }
+
 
             kelly_sizes = {
                 side: {
@@ -734,7 +735,7 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
                             "content": prompt
                         }
                     ],
-                    "temperature": 0.1
+                    "temperature": 0.2
                 },
                 headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
             )
