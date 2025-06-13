@@ -586,7 +586,7 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
     print('Getting data for analysis') 
     features = get_features_by_indicator(interval, feature)
     analysis_translated = None
-    model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
+    model_name = feature
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
 

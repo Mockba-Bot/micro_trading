@@ -469,7 +469,7 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
     print('Getting data for analysis') 
     features = get_features_by_indicator("1h", feature)
     analysis_translated = None
-    model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
+    model_name = feature
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
     
@@ -535,13 +535,13 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
             **Contextual Preference:** If technical indicators, model signals, or trend data point toward a clear bullish or bearish setup, prioritize a LONG or SHORT recommendation over HOLD. HOLD should only be used if signals are genuinely conflicting or inconclusive. Be decisive when confidence is medium to high.
             
             ### Required Format:
-            [Asset/Timeframe] Technical Analysis - {get_strategy_name(interval, features)}
+            [Asset/Timeframe] Technical Analysis - {feature}
             🔹 Current Price: {current_price}
             🔸 Market Phase: [trending/consolidating/reversing]
             🔸 Last Signals: {last_3_predictions} → Current: {current_prediction} ({confidence_level} confidence)
             🔸 Active Indicators: {features}
 
-            📊 Key Indicators (Using: {get_strategy_name(interval, features)})
+            📊 Key Indicators (Using: {feature})
             - [Indicator from {features}]: [value] → [interpretation]
             - [Indicator from {features}]: [value] → [interpretation]
 
