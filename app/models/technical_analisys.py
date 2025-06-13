@@ -531,7 +531,9 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
             # --- Generate Professional Prompt ---
             prompt = f"""
             **Task:** Generate a professional trading analysis for {asset} {interval} with {leverage}x leverage in the exact format specified below and optimize for Telegram.
-
+            
+            **Contextual Preference:** If technical indicators, model signals, or trend data point toward a clear bullish or bearish setup, prioritize a LONG or SHORT recommendation over HOLD. HOLD should only be used if signals are genuinely conflicting or inconclusive. Be decisive when confidence is medium to high.
+            
             ### Required Format:
             [Asset/Timeframe] Technical Analysis - {get_strategy_name(interval, features)}
             🔹 Current Price: {current_price}

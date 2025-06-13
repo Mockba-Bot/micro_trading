@@ -582,13 +582,14 @@ async def get_funding_rate(symbol):
         return 0.0  # Default neutral rate
 
         
-async def analize_probability_asset(token, asset, interval, feature, leverage, target_lang, free_colateral,  market_bias='neutral'):
+async def analize_probability_asset(token, asset, interval, feature, leverage, target_lang, free_colateral, market_bias='neutral'):
     print('Getting data for analysis') 
-    features = get_features_by_indicator("1h", feature)
+    features = get_features_by_indicator(interval, feature)
     analysis_translated = None
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
+
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
         try:
             # --- Data Preparation ---
@@ -605,131 +606,63 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
             model_metadata = joblib.load(local_model_path)
             model = model_metadata["model"]
             used_features = model_metadata.get("used_features", [])
-            # Ensure essential features are present
-            for f in ["rsi_14", "macd", "macd_signal"]:
-                if f not in features:
-                    used_features.append(f)
-            
-            # Add missing indicators
+
             missing_features = [f for f in used_features if f not in data.columns]
             if missing_features:
                 data = add_indicators(data, missing_features)
 
-            # Also make sure to handle cases where the indicator calculation might fail:
-            rsi_value = data['rsi_14'].iloc[-1] if 'RSI_14' in data.columns else 'N/A'
-            macd_status = ('Bullish' if data['macd'].iloc[-1] > data['macd_signal'].iloc[-1] 
-                        else 'Bearish') if all(col in data.columns for col in ['macd', 'macd_signal']) else 'N/A'      
-            
+            # Dynamically extract indicators only if available
+            rsi_value = data['rsi_14'].iloc[-1] if 'rsi_14' in features and 'rsi_14' in data.columns else 'N/A'
+            macd_latest = data['macd'].iloc[-1] if 'macd' in features and 'macd' in data.columns else None
+            macd_signal_latest = data['macd_signal'].iloc[-1] if 'macd_signal' in features and 'macd_signal' in data.columns else None
+            macd_status = (
+                'Bullish' if macd_latest is not None and macd_signal_latest is not None and macd_latest > macd_signal_latest
+                else 'Bearish' if macd_latest is not None and macd_signal_latest is not None
+                else 'N/A'
+            )
+
+            # Build indicator snapshot for prompt
+            indicator_snapshot = ""
+            if 'rsi_14' in features:
+                indicator_snapshot += f"• RSI(14): {rsi_value}\n"
+            if 'macd' in features and 'macd_signal' in features:
+                indicator_snapshot += f"• MACD: {macd_latest:.2f} vs Signal: {macd_signal_latest:.2f} → {macd_status}\n"
+            indicator_snapshot += f"• Volume (latest): {data['volume'].iloc[-1]:,.0f}"
+
+            # Build guidance string
+            confirmation_guidance = ""
+            if 'rsi_14' in features:
+                confirmation_guidance += "- If RSI is below 30, do NOT recommend 'RSI > 60/70' as confirmation.\n"
+            if 'macd' in features and 'macd_signal' in features:
+                confirmation_guidance += "- If MACD is bearish, do not suggest bullish divergence.\n"
+            confirmation_guidance += "- Reference only actual values shown in the snapshot."
+
             data = data[used_features].dropna().copy()
-            
-            # --- Core Predictions ---
+
             y_proba = model.predict_proba(data[features])
             proba_df = pd.DataFrame(y_proba, columns=model.classes_)
-            
-            # # --- Advanced Scenario Analysis ---
+
             data = prob_engine.calculate_advanced_scenarios(data)
-            
-            # Calculate all scenario probabilities
             scenario_probs = {
-                'long': {
-                    '0.3%': data['long_03_prob'].mean(),
-                    '0.5%': data['long_05_prob'].mean(),
-                    '1.0%': data['long_10_prob'].mean(),
-                    '1.5%': data['long_15_prob'].mean(),
-                    '2.0%': data['long_20_prob'].mean()
-                },
-                'short': {
-                    '0.3%': data['short_03_prob'].mean(),
-                    '0.5%': data['short_05_prob'].mean(),
-                    '1.0%': data['short_10_prob'].mean(),
-                    '1.5%': data['short_15_prob'].mean(),
-                    '2.0%': data['short_20_prob'].mean()
-                }
+                'long': {k: data[f'long_{k.replace(".", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']},
+                'short': {k: data[f'short_{k.replace(".", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']}
             }
-            
-            # --- Dynamic Kelly Sizing ---
+
             kelly_sizes = {
-                'long': {
-                    '0.3%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['long']['0.3%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=1.5,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    ),
-                    '0.5%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['long']['0.5%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=2.0,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    ),
-                    '1.0%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['long']['1.0%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=3.0,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    ),
-                    '1.5%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['long']['1.5%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=4.0,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    ),
-                    '2.0%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['long']['2.0%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=5.0,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    )
-                },
-                'short': {
-                    '0.3%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['short']['0.3%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=1.5,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    ),
-                    '0.5%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['short']['0.5%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=2.0,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    ),
-                    '1.0%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['short']['1.0%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=3.0,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    ),
-                    '1.5%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['short']['1.5%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=4.0,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    ),
-                    '2.0%': prob_engine.dynamic_kelly(
-                        prob_win=scenario_probs['short']['2.0%'],  # Changed from prob to prob_win
-                        reward_risk_ratio=5.0,
-                        leverage=leverage,
-                        funding_rate=current_funding
-                    )
-                }
+                side: {
+                    k: prob_engine.dynamic_kelly(prob, float(k.strip('%')) * 5, leverage, current_funding)
+                    for k, prob in probs.items()
+                } for side, probs in scenario_probs.items()
             }
-            
-            # --- Confidence Calculation ---
+
             confidence_level, confidence_score = prob_engine.calculate_confidence(proba_df, current_funding)
-            
-            # --- Risk Assessment ---
             liq_risk = prob_engine.monte_carlo_liquidation(
                 price=data['close'].iloc[-1],
                 atr=data['atr_14'].iloc[-1],
-                position_size=max(
-                    max(kelly_sizes['long'].values()),
-                    max(kelly_sizes['short'].values())
-                ),
+                position_size=max(max(kelly_sizes['long'].values()), max(kelly_sizes['short'].values())),
                 leverage=leverage
             )
-            
-            # --- Signal Generation ---
+
             target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
             if market_bias == 'bullish':
                 target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
@@ -738,18 +671,13 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
 
             n_samples = len(proba_df)
             target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
-            
-            y_custom = np.zeros(len(proba_df), dtype=int)
+            y_custom = np.zeros(n_samples, dtype=int)
             for cls in [-1, 1]:
                 top_indices = proba_df[cls].nlargest(target_counts[cls]).index
                 y_custom[top_indices] = cls
-            
             data['predicted'] = y_custom
             current_prediction = data['predicted'].iloc[-1]
-            #store data as csv file
-            # data.to_csv(f'temp/{asset}_{interval}_data.csv', index=False)
-            
-            #--- Generate Professional Prompt ---
+
             prompt = f"""
             🌟 *Advanced Trading Signal - {asset} {interval}* 🌟
             💰 Free Collateral: ${free_colateral:,.2f} | ⚖️ Leverage: {leverage}x
@@ -761,27 +689,24 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
 
             🎯 *Probability Matrix*
             👉 *LONG Targets*:
-            0.3% → {scenario_probs['long']['0.3%']:.1%} | 🎯 Size: {kelly_sizes['long']['0.3%']:.2f}x
-            0.5% → {scenario_probs['long']['0.5%']:.1%} | 🎯 Size: {kelly_sizes['long']['0.5%']:.2f}x
-            1.0% → {scenario_probs['long']['1.0%']:.1%} | 🎯 Size: {kelly_sizes['long']['1.0%']:.2f}x
-            1.5% → {scenario_probs['long']['1.5%']:.1%} | 🎯 Size: {kelly_sizes['long']['1.5%']:.2f}x
-            2.0% → {scenario_probs['long']['2.0%']:.1%} | 🎯 Size: {kelly_sizes['long']['2.0%']:.2f}x
+            {chr(10).join([f"{k} → {scenario_probs['long'][k]:.1%} | 🎯 Size: {kelly_sizes['long'][k]:.2f}x" for k in scenario_probs['long']])}
 
             👉 *SHORT Targets*:
-            0.3% → {scenario_probs['short']['0.3%']:.1%} | 🎯 Size: {kelly_sizes['short']['0.3%']:.2f}x
-            0.5% → {scenario_probs['short']['0.5%']:.1%} | 🎯 Size: {kelly_sizes['short']['0.5%']:.2f}x
-            1.0% → {scenario_probs['short']['1.0%']:.1%} | 🎯 Size: {kelly_sizes['short']['1.0%']:.2f}x
-            1.5% → {scenario_probs['short']['1.5%']:.1%} | 🎯 Size: {kelly_sizes['short']['1.5%']:.2f}x
-            2.0% → {scenario_probs['short']['2.0%']:.1%} | 🎯 Size: {kelly_sizes['short']['2.0%']:.2f}x
+            {chr(10).join([f"{k} → {scenario_probs['short'][k]:.1%} | 🎯 Size: {kelly_sizes['short'][k]:.2f}x" for k in scenario_probs['short']])}
 
             ⚡ *Signal*: {'🟢 STRONG LONG' if current_prediction == 1 else '🔴 STRONG SHORT' if current_prediction == -1 else '🟡 NEUTRAL'} 
             📊 Confidence: {confidence_score}% {'✅ High' if confidence_score > 70 else '⚠️ Medium' if confidence_score > 50 else '❌ Low'}
             🔄 Market Bias: {market_bias.upper()} {'🐂' if market_bias == 'bullish' else '🐻' if market_bias == 'bearish' else '🦉'}
 
             💎 *Strategic Recommendation*
-            {"🚀 AGGRESSIVE LONG" if scenario_probs['long']['1.0%'] > 0.7 else 
-            "🎯 PREFER SHORTS" if scenario_probs['short']['0.5%'] > 0.7 else 
-            "🛑 WAIT FOR BETTER ENTRY"}
+            {"🚀 AGGRESSIVE LONG" if scenario_probs['long']['1.0%'] > 0.7 else "🎯 PREFER SHORTS" if scenario_probs['short']['0.5%'] > 0.7 else "🛑 WAIT FOR BETTER ENTRY"}
+
+            📌 *Indicator Snapshot*
+            {indicator_snapshot}
+
+            💡 *Model Instruction*  
+            Use the indicator snapshot above when suggesting confirmation conditions.  
+            {confirmation_guidance}
 
             ⚠️ *Risk Assessment*
             💀 Liquidation Risk: {liq_risk:.1%} {'(High)' if liq_risk > 0.3 else '(Medium)' if liq_risk > 0.15 else '(Low)'}
@@ -793,35 +718,27 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
             • Max position: {min(max(kelly_sizes['long'].values()) + max(kelly_sizes['short'].values()), leverage):.1f}x
             • 📅 Data points: {len(data)} samples
             • ⚠️ Always use stop-loss!
-
-            💡 *AI Quant Suggestions*:
-            1. Provide exact entry/exit prices with confirmation conditions
-            2. Suggest position sizing adjustments based on probability
-            3. Highlight real-time risk alerts with specific triggers
-            4. Give clear execution priority (which trade to take first)
-            5. Include abort conditions for each scenario
             """
-            
-            # --- API Call ---
+
             response = requests.post(
                 "https://api.deepseek.com/v1/chat/completions",
-                            json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Respond in this exact structure:\n\n📊 DIRECTIONAL EDGE ANALYSIS\n[LONG/SHORT] | Best Target: X.X% Move\n┌─────────┬────────────┬────────────┬────────────┐\n│ Target  │ Win Prob   │ Kelly Size │ Edge       │\n├─────────┼────────────┼────────────┼────────────┤\n│ 0.3%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n│ 0.5%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n└─────────┴────────────┴────────────┴────────────┘\n\n🎯 EXECUTION SUMMARY\n• Preferred Direction: [STRONG LONG/PREFER SHORTS/NEUTRAL]\n• Entry: $XXX-$XXX (Confirm with: [Indicator1+Indicator2])\n• Exit: Take-Profit at X.X% (X.X% position), Stop-Loss at $XXX\n\n⚠️ RISK PROFILE\n• Max Position: X.X% of capital\n• Liquidation Risk: X.X%\n• Funding Impact: ±X.XX%"
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": 0.1
-            },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Respond in this exact structure:\n\n📊 DIRECTIONAL EDGE ANALYSIS\n[LONG/SHORT] | Best Target: X.X% Move\n┌─────────┬────────────┬────────────┬────────────┐\n│ Target  │ Win Prob   │ Kelly Size │ Edge       │\n├─────────┼────────────┼────────────┼────────────┤\n│ 0.3%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n│ 0.5%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n└─────────┴────────────┴────────────┴────────────┘\n\n🎯 EXECUTION SUMMARY\n• Preferred Direction: [STRONG LONG/PREFER SHORTS/NEUTRAL]\n• Entry: $XXX-$XXX (Confirm with: [Indicator1+Indicator2])\n• Exit: Take-Profit at X.X% (X.X% position), Stop-Loss at $XXX\n\n⚠️ RISK PROFILE\n• Max Position: X.X% of capital\n• Liquidation Risk: X.X%\n• Funding Impact: ±X.XX%"
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": 0.1
+                },
                 headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
             )
-            
+
             if response.status_code == 200:
                 analysis = response.json()["choices"][0]["message"]["content"]
                 analysis_translated = translate(analysis, target_lang).replace("###", "").strip()
@@ -829,8 +746,8 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
                 print("✅ Analysis sent successfully!")
           
         finally:
-             if os.path.exists(local_model_path):
-                 os.remove(local_model_path)
+            if os.path.exists(local_model_path):
+                os.remove(local_model_path)
 
         return analysis_translated
     else:
