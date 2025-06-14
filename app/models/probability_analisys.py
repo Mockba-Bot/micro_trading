@@ -748,7 +748,11 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
             else:
                 print(f"❌ Error in API response: {response.status_code} - {response.text}")
                 analysis_translated = translate(f"❌ Error API response: {response.status_code} - {response.text}", target_lang)
-                await send_bot_message(token, analysis_translated)    
+                await send_bot_message(token, analysis_translated)   
+
+        except Exception as e:
+            logger.error(f"Error processing {interval}: {e}")
+            await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))         
           
         finally:
             if os.path.exists(local_model_path):
