@@ -472,6 +472,15 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
     model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
+
+    cache_key = f"kelly_analysis:{asset}:{interval}"
+    
+    # --- Try retrieving from Redis ---
+    cached = await redis_client.get(cache_key)
+    if cached:
+        analysis_translated = translate(cached.decode(), target_lang)
+        await send_bot_message(token, analysis_translated)
+        return cached.decode()
     
 
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
@@ -627,8 +636,11 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
             if response.status_code == 200:
                 analysis = response.json()["choices"][0]["message"]["content"]
                 analysis_translated = translate(analysis, target_lang)
+
+                # Store in Redis for 20 minutes (1200 seconds)
+                await redis_client.set(cache_key, analysis, ex=1200)
+
                 await send_bot_message(token, analysis_translated)
-                print(f"Message length: {len(analysis_translated)}")
                 print("✅ Analysis sent successfully!")
             else:
                 print(f"❌ Error in API response: {response.status_code} - {response.text}")

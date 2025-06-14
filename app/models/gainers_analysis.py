@@ -219,6 +219,16 @@ async def analyze_movements(
     movement_type: str = 'gainers',
     top_n: int = 10
 ) -> List[Tuple[str, float, float]]:
+    
+    cache_key = f"gainers_losers_analysis:{movement_type}"
+    
+    # --- Try retrieving from Redis ---
+    cached = await redis_client.get(cache_key)
+    if cached:
+        translated = GoogleTranslator(source='auto', target=target_lang).translate(cached.decode())
+        await send_bot_message(token, translated)
+        return cached.decode()
+    
     all_movements = await fetch_and_analyze_movements(token, interval, change_threshold)
     
     if movement_type == 'gainers':
@@ -246,6 +256,9 @@ async def analyze_movements(
         message = "\n".join(message_lines)
 
     translated = GoogleTranslator(source='auto', target=target_lang).translate(message)
+    # Store in Redis for 20 minutes (1200 seconds)
+    await redis_client.set(cache_key, message, ex=1200)
+    
     await send_bot_message(token, translated)
     
     return top_movements

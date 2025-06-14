@@ -178,6 +178,15 @@ async def analyze_intervals(asset, token, interval, target_lang):
     future_steps = 10
     analysis_translated = None
 
+    cache_key = f"ew_analysis:{asset}:{interval}"
+    
+    # --- Try retrieving from Redis ---
+    cached = await redis_client.get(cache_key)
+    if cached:
+        analysis_translated = translate(cached.decode(), target_lang)
+        await send_bot_message(token, analysis_translated)
+        return cached.decode()
+
 
     MODEL_KEY = f'Mockba/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
     local_model_path = f'temp/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
@@ -304,6 +313,10 @@ async def analyze_intervals(asset, token, interval, target_lang):
             if response.status_code == 200:
                 analysis = response.json()["choices"][0]["message"]["content"]
                 analysis_translated = translate(analysis, target_lang)
+
+                # Store in Redis for 20 minutes (1200 seconds)
+                await redis_client.set(cache_key, analysis, ex=1200)
+
                 await send_bot_message(token, analysis_translated)
                 # print(analysis_translated)
             else:
