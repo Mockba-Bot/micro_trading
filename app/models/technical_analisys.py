@@ -272,9 +272,9 @@ def add_indicators(data, required_features):
         if feature.startswith("stoch_"):
             try:
                 window = int(feature.split("_")[-1])  # Extract window size from feature name
-                data['stoch_k'] = ((data['close'] - data['low'].rolling(window).min()) /
+                data['stoch_k_14'] = ((data['close'] - data['low'].rolling(window).min()) /
                                    (data['high'].rolling(window).max() - data['low'].rolling(window).min())) * 100
-                data['stoch_d'] = data['stoch_k'].rolling(3).mean()
+                data['stoch_d_14'] = data['stoch_k_14'].rolling(3).mean()
             except (IndexError, ValueError):
                 print(f"⚠️ Warning: Could not extract window size from feature: {feature}")
 
