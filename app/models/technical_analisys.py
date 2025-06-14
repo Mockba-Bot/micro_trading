@@ -631,7 +631,9 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
                 print(f"Message length: {len(analysis_translated)}")
                 print("✅ Analysis sent successfully!")
             else:
-                print(f"Error: {response.status_code}, {response.text}")
+                print(f"❌ Error in API response: {response.status_code} - {response.text}")
+                analysis_translated = translate(f"❌ Error API response: {response.status_code} - {response.text}", target_lang)
+                await send_bot_message(token, analysis_translated)
           
         finally:
             if os.path.exists(local_model_path):
