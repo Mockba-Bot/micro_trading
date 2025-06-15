@@ -24,9 +24,14 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv(dotenv_path=".env.micro.trading")
 
-# Redis Configuration
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-redis_client = redis.from_url(REDIS_URL)
+# Initialize Redis connection
+try:
+    redis_client = redis.from_url(os.getenv("REDIS_URL"))
+    redis_client.ping()
+except redis.ConnectionError as e:
+    print(f"Redis connection error: {e}")
+    redis_client = None
+
 
 # Orderly API Config
 BASE_URL = os.getenv("ORDERLY_BASE_URL")
