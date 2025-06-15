@@ -22,6 +22,8 @@ from sklearn.preprocessing import MinMaxScaler
 import threading
 import telebot
 import json
+from scipy.signal import find_peaks
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -173,18 +175,88 @@ def format_analysis_for_telegram(cached_data):
         print(f"Error formatting cached data: {e}")
         return None
 
-def is_valid_wave_structure(data):
-    # Just an example heuristic:
-    highs = data['high'].values
-    lows = data['low'].values
 
-    wave1_start = highs[0]
-    wave1_end = highs[10]
-    wave2_low = lows[20]
+def detect_zigzag_pivots(close_prices, distance=5, prominence=1.0):
+    """
+    Detect zigzag turning points from close prices using peak detection.
 
-    if wave2_low < wave1_start:
-        return False  # Wave 2 broke rule
+    Returns:
+        List of tuples (index, price)
+    """
+    peaks, _ = find_peaks(close_prices, distance=distance, prominence=prominence)
+    troughs, _ = find_peaks(-close_prices, distance=distance, prominence=prominence)
+
+    pivots = [(i, close_prices[i]) for i in peaks]
+    pivots += [(i, close_prices[i]) for i in troughs]
+    pivots = sorted(pivots, key=lambda x: x[0])  # sort by time
+
+    return pivots
+
+def is_valid_elliott_structure_from_pivots(data, verbose=False):
+    """
+    Use ZigZag peaks and troughs to validate Elliott Wave structure (bullish or bearish).
+    Assumes 5 major pivot points represent wave 1 to 5.
+
+    Returns:
+        bool: True if valid structure
+    """
+    closes = data['close'].values
+    pivots = detect_zigzag_pivots(closes, distance=5, prominence=1.0)
+
+    if len(pivots) < 6:
+        if verbose:
+            print("❌ Not enough pivot points to identify 5-wave structure.")
+        return False
+
+    # Use the first 6 pivots to represent Wave 1 to 5:
+    # Wave 1: pivot[0] → pivot[1]
+    # Wave 2: pivot[1] → pivot[2]
+    # Wave 3: pivot[2] → pivot[3]
+    # Wave 4: pivot[3] → pivot[4]
+    # Wave 5: pivot[4] → pivot[5]
+    p = pivots[:6]
+    prices = [pt[1] for pt in p]
+
+    direction = "bullish" if prices[1] > prices[0] else "bearish"
+
+    if verbose:
+        print(f"Detected {direction.upper()} structure:")
+        for i, (idx, val) in enumerate(p[:6]):
+            print(f"Wave {i+1} point: Index {idx}, Price {val:.2f}")
+
+    # Apply rules:
+    if direction == "bullish":
+        wave1_len = prices[1] - prices[0]
+        wave3_len = prices[3] - prices[2]
+        wave5_len = prices[5] - prices[4]
+
+        if prices[2] < prices[0]:
+            if verbose: print("❌ Wave 2 broke below Wave 1 start.")
+            return False
+        if wave3_len < wave1_len or wave3_len < wave5_len:
+            if verbose: print("❌ Wave 3 is shorter than Wave 1 or 5.")
+            return False
+        if prices[4] < prices[1]:
+            if verbose: print("❌ Wave 4 overlaps Wave 1.")
+            return False
+
+    else:  # bearish
+        wave1_len = prices[0] - prices[1]
+        wave3_len = prices[2] - prices[3]
+        wave5_len = prices[4] - prices[5]
+
+        if prices[2] > prices[0]:
+            if verbose: print("❌ Wave 2 retraced above Wave 1 start.")
+            return False
+        if wave3_len < wave1_len or wave3_len < wave5_len:
+            if verbose: print("❌ Wave 3 is shorter than Wave 1 or 5.")
+            return False
+        if prices[4] > prices[1]:
+            if verbose: print("❌ Wave 4 overlaps Wave 1.")
+            return False
+
     return True
+
 
 # Function to analyze multiple intervals and return explanations using XGBRegressor
 async def analyze_intervals(asset, token, interval, target_lang):
@@ -211,10 +283,11 @@ async def analyze_intervals(asset, token, interval, target_lang):
             data = fetch_historical_orderly(asset, interval)
 
             # 🔍 Wave structure sanity check
-            if not is_valid_wave_structure(data):
-                message = f"⚠️ Wave structure for {asset} ({interval}) is invalid. No valid Elliott formation detected."
+            if not is_valid_elliott_structure_from_pivots(data, verbose=True):
+                message = f"⚠️ Invalid Elliott structure detected for {asset} ({interval})."
                 await send_bot_message(token, translate(message, target_lang))
                 return message
+
 
 
             # Normalize
