@@ -657,4 +657,7 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
 
         return analysis_translated
     else:
+        message = f"❌ Model not found for {asset} {interval} with features {features}"
+        translated_message = translate(message, target_lang)
+        await send_bot_message(token, translated_message)
         return translate(f"❌ Model not found for {asset} {interval} with features {features}", target_lang)

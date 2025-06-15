@@ -773,4 +773,7 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
 
         return analysis_translated
     else:
+        message = f"❌ Model not found for {asset} {interval} with features {features}"
+        translated_message = translate(message, target_lang)
+        await send_bot_message(token, translated_message)
         return translate(f"❌ Model not found for {asset} {interval} with features {features}", target_lang)
