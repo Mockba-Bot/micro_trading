@@ -127,8 +127,9 @@ def fetch_historical_orderly(symbol, interval):
         df = df[["open", "high", "low", "close", "volume"]]
         df = df[~df.index.duplicated(keep='first')]  # Remove duplicates
         
-        # Sort by date (newest first) and return last 100
-        return df.sort_index(ascending=False).head(100)
+        # Sort by index (timestamp) in ascending order
+        return df.sort_index(ascending=True).tail(100)
+
     
     return None
 
@@ -171,7 +172,20 @@ def format_analysis_for_telegram(cached_data):
     except Exception as e:
         print(f"Error formatting cached data: {e}")
         return None
-    
+
+def is_valid_wave_structure(data):
+    # Just an example heuristic:
+    highs = data['high'].values
+    lows = data['low'].values
+
+    wave1_start = highs[0]
+    wave1_end = highs[10]
+    wave2_low = lows[20]
+
+    if wave2_low < wave1_start:
+        return False  # Wave 2 broke rule
+    return True
+
 # Function to analyze multiple intervals and return explanations using XGBRegressor
 async def analyze_intervals(asset, token, interval, target_lang):
     look_back = 60
@@ -195,6 +209,13 @@ async def analyze_intervals(asset, token, interval, target_lang):
     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
         try:
             data = fetch_historical_orderly(asset, interval)
+
+            # 🔍 Wave structure sanity check
+            if not is_valid_wave_structure(data):
+                message = f"⚠️ Wave structure for {asset} ({interval}) is invalid. No valid Elliott formation detected."
+                await send_bot_message(token, translate(message, target_lang))
+                return message
+
 
             # Normalize
             scaler = MinMaxScaler(feature_range=(0, 1))
