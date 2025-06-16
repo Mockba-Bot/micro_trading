@@ -262,7 +262,7 @@ async def analyze_movements(
 
     translated = GoogleTranslator(source='auto', target=target_lang).translate(message)
     # Store in Redis for 20 minutes (1200 seconds)
-    await redis_client.set(cache_key, message, ex=1200)
+    redis_client.set(cache_key, message, ex=1200)
     
     await send_bot_message(token, translated)
     
