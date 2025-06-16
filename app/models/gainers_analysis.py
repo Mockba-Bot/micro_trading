@@ -238,12 +238,12 @@ async def analyze_movements(
     
     if movement_type == 'gainers':
         filtered = [m for m in all_movements if m[1] >= change_threshold]
-        filtered.sort(key=lambda x: x[1], reverse=True)
+        filtered.sort(key=lambda x: x[1])
         title_icon = "📈"
         title_text = "Top Gainers"
     elif movement_type == 'losers':
         filtered = [m for m in all_movements if m[1] <= -change_threshold]
-        filtered.sort(key=lambda x: x[1])  # Most negative first
+        filtered.sort(key=lambda x: x[1], reverse=True)  # Most negative first
         title_icon = "📉"
         title_text = "Top Losers"
     else:
