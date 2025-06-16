@@ -228,7 +228,7 @@ async def analyze_movements(
     cache_key = f"gainers_losers_analysis:{movement_type}"
     
     # --- Try retrieving from Redis ---
-    cached = await redis_client.get(cache_key)
+    cached = redis_client.get(cache_key)
     if cached:
         translated = GoogleTranslator(source='auto', target=target_lang).translate(cached.decode())
         await send_bot_message(token, translated)
