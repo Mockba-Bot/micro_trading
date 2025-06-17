@@ -195,10 +195,13 @@ def detect_zigzag_pivots(close_prices, distance=5, prominence=1.0):
 def is_valid_elliott_structure_from_pivots(data, verbose=False):
     """
     Use ZigZag peaks and troughs to validate Elliott Wave structure (bullish or bearish).
-    Assumes 5 major pivot points represent wave 1 to 5.
-
     Returns:
-        bool: True if valid structure
+        dict: {
+            "valid": bool,
+            "score": float,
+            "direction": "bullish" | "bearish",
+            "pivots": list of (index, price)
+        }
     """
     closes = data['close'].values
     pivots = detect_zigzag_pivots(closes, distance=5, prominence=1.0)
@@ -206,56 +209,82 @@ def is_valid_elliott_structure_from_pivots(data, verbose=False):
     if len(pivots) < 6:
         if verbose:
             print("❌ Not enough pivot points to identify 5-wave structure.")
-        return False
+        return {"valid": False, "score": 0.0, "direction": None, "pivots": pivots}
 
-    # Use the first 6 pivots to represent Wave 1 to 5:
-    # Wave 1: pivot[0] → pivot[1]
-    # Wave 2: pivot[1] → pivot[2]
-    # Wave 3: pivot[2] → pivot[3]
-    # Wave 4: pivot[3] → pivot[4]
-    # Wave 5: pivot[4] → pivot[5]
+    # Use the first 6 pivots
     p = pivots[:6]
     prices = [pt[1] for pt in p]
 
     direction = "bullish" if prices[1] > prices[0] else "bearish"
+    valid = True
+    score = 1.0
 
     if verbose:
-        print(f"Detected {direction.upper()} structure:")
-        for i, (idx, val) in enumerate(p[:6]):
-            print(f"Wave {i+1} point: Index {idx}, Price {val:.2f}")
+        print(f"🔍 Checking {direction.upper()} wave structure from pivots:")
+        for i, (idx, val) in enumerate(p):
+            print(f"Wave {i+1}: Index {idx}, Price {val:.2f}")
 
-    # Apply rules:
     if direction == "bullish":
         wave1_len = prices[1] - prices[0]
+        wave2_len = prices[1] - prices[2]
         wave3_len = prices[3] - prices[2]
+        wave4_len = prices[3] - prices[4]
         wave5_len = prices[5] - prices[4]
 
-        if prices[2] < prices[0]:
-            if verbose: print("❌ Wave 2 broke below Wave 1 start.")
-            return False
-        if wave3_len < wave1_len or wave3_len < wave5_len:
-            if verbose: print("❌ Wave 3 is shorter than Wave 1 or 5.")
-            return False
-        if prices[4] < prices[1]:
-            if verbose: print("❌ Wave 4 overlaps Wave 1.")
-            return False
+        if prices[2] < prices[0]:  # Wave 2 invalid retrace
+            if verbose:
+                print("⚠️ Wave 2 retraced below Wave 1 start.")
+            score -= 0.2
+        if wave3_len < wave1_len * 0.8:
+            if verbose:
+                print("⚠️ Wave 3 not extended beyond Wave 1 (weak impulse).")
+            score -= 0.3
+        if prices[4] < prices[1] * 0.98:  # Allow 2% overlap tolerance
+            if verbose:
+                print("⚠️ Wave 4 likely overlaps Wave 1 (within tolerance).")
+            score -= 0.2
+        if wave5_len < wave3_len * 0.5:  # Weak Wave 5
+            if verbose:
+                print("⚠️ Wave 5 is weaker than expected.")
+            score -= 0.1
 
     else:  # bearish
         wave1_len = prices[0] - prices[1]
+        wave2_len = prices[2] - prices[1]
         wave3_len = prices[2] - prices[3]
+        wave4_len = prices[3] - prices[4]
         wave5_len = prices[4] - prices[5]
 
         if prices[2] > prices[0]:
-            if verbose: print("❌ Wave 2 retraced above Wave 1 start.")
-            return False
-        if wave3_len < wave1_len or wave3_len < wave5_len:
-            if verbose: print("❌ Wave 3 is shorter than Wave 1 or 5.")
-            return False
-        if prices[4] > prices[1]:
-            if verbose: print("❌ Wave 4 overlaps Wave 1.")
-            return False
+            if verbose:
+                print("⚠️ Wave 2 retraced above Wave 1 start.")
+            score -= 0.2
+        if wave3_len < wave1_len * 0.8:
+            if verbose:
+                print("⚠️ Wave 3 not extended beyond Wave 1.")
+            score -= 0.3
+        if prices[4] > prices[1] * 1.02:  # 2% overlap tolerance
+            if verbose:
+                print("⚠️ Wave 4 may overlap Wave 1.")
+            score -= 0.2
+        if wave5_len < wave3_len * 0.5:
+            if verbose:
+                print("⚠️ Wave 5 is weak.")
+            score -= 0.1
 
-    return True
+    score = max(min(score, 1.0), 0.0)
+    valid = score >= 0.6
+
+    if verbose:
+        print(f"✅ Structure score: {score:.2f} => {'VALID' if valid else 'INVALID'}")
+
+    return {
+        "valid": valid,
+        "score": score,
+        "direction": direction,
+        "pivots": p
+    }
+
 
 
 # Function to analyze multiple intervals and return explanations using XGBRegressor
@@ -283,12 +312,15 @@ async def analyze_intervals(asset, token, interval, target_lang):
             data = fetch_historical_orderly(asset, interval)
 
             # 🔍 Wave structure sanity check
-            if not is_valid_elliott_structure_from_pivots(data, verbose=True):
-                message = f"⚠️ Invalid Elliott structure detected for {asset} ({interval})."
+            wave_result = is_valid_elliott_structure_from_pivots(data, verbose=True)
+            if not wave_result["valid"]:
+                message = (
+                    f"⚠️ Weak or invalid Elliott structure for {asset} ({interval})\n"
+                    f"Score: {wave_result['score']:.2f} | Direction: {wave_result['direction'] or 'unknown'}"
+                )
                 await send_bot_message(token, translate(message, target_lang))
-                return message
-
-
+                # You can still proceed if you want ML to analyze anyway
+                # return message  # Or comment this to allow fallback to ML prediction
 
             # Normalize
             scaler = MinMaxScaler(feature_range=(0, 1))
