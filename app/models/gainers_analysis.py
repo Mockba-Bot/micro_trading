@@ -225,7 +225,7 @@ async def analyze_movements(
     top_n: int = 10
 ) -> List[Tuple[str, float, float]]:
     
-    cache_key = f"gainers_losers_analysis:{movement_type}"
+    cache_key = f"analyze_movements_analysis:{movement_type}"
     
     # --- Try retrieving from Redis ---
     cached = redis_client.get(cache_key)

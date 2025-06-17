@@ -264,7 +264,7 @@ async def analyze_intervals(asset, token, interval, target_lang):
     future_steps = 10
     analysis_translated = None
 
-    cache_key = f"ew_analysis:{asset}:{interval}"
+    cache_key = f"analyze_intervals_analysis:{asset}:{interval}"
     
     # --- Try retrieving from Redis ---
     cached = await redis_client.get(cache_key)

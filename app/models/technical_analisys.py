@@ -473,7 +473,7 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
 
-    cache_key = f"kelly_analysis:{asset}:{interval}"
+    cache_key = f"analize_asset_analysis:{asset}:{interval}"
     
     # --- Try retrieving from Redis ---
     cached = await redis_client.get(cache_key)
@@ -547,6 +547,7 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
             [Asset/Timeframe] Technical Analysis - {feature}
             🔹 Current Price: {current_price}
             🔸 Market Phase: [trending/consolidating/reversing]
+            🔸 Signals: 1 Buy, -1 Sell, 0 Hold
             🔸 Last Signals: {last_3_predictions} → Current: {current_prediction} ({confidence_level} confidence)
             🔸 Active Indicators: {features}
 

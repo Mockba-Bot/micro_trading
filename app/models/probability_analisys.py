@@ -590,7 +590,7 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
     MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
     local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
 
-    cache_key = f"kelly_analysis:{asset}:{interval}"
+    cache_key = f"analize_probability_asset_analysis:{asset}:{interval}"
     
     # --- Try retrieving from Redis ---
     cached = await redis_client.get(cache_key)
