@@ -194,96 +194,83 @@ def detect_zigzag_pivots(close_prices, distance=5, prominence=1.0):
 
 def is_valid_elliott_structure_from_pivots(data, verbose=False):
     """
-    Use ZigZag peaks and troughs to validate Elliott Wave structure (bullish or bearish).
+    Scan recent pivots to identify the best-fitting Elliott Wave pattern (1–5).
     Returns:
-        dict: {
-            "valid": bool,
-            "score": float,
-            "direction": "bullish" | "bearish",
-            "pivots": list of (index, price)
-        }
+        dict with:
+            - valid: bool
+            - score: float
+            - direction: 'bullish' | 'bearish'
+            - pivots: list of (index, price)
     """
     closes = data['close'].values
-    pivots = detect_zigzag_pivots(closes, distance=5, prominence=1.0)
+    all_pivots = detect_zigzag_pivots(closes, distance=3, prominence=0.5)
 
-    if len(pivots) < 6:
+    if len(all_pivots) < 6:
         if verbose:
-            print("❌ Not enough pivot points to identify 5-wave structure.")
-        return {"valid": False, "score": 0.0, "direction": None, "pivots": pivots}
+            print("❌ Not enough pivot points to identify a structure.")
+        return {"valid": False, "score": 0.0, "direction": None, "pivots": all_pivots}
 
-    # Use the first 6 pivots
-    p = pivots[:6]
-    prices = [pt[1] for pt in p]
+    best_score = 0.0
+    best_result = None
 
-    direction = "bullish" if prices[1] > prices[0] else "bearish"
-    valid = True
-    score = 1.0
+    # Slide over the last N pivots (max 30) in windows of 6
+    max_pivots = min(len(all_pivots), 30)
+    for i in range(max_pivots - 5):
+        p = all_pivots[i:i+6]
+        prices = [pt[1] for pt in p]
+        direction = "bullish" if prices[1] > prices[0] else "bearish"
+        score = 1.0
 
-    if verbose:
-        print(f"🔍 Checking {direction.upper()} wave structure from pivots:")
-        for i, (idx, val) in enumerate(p):
-            print(f"Wave {i+1}: Index {idx}, Price {val:.2f}")
+        if direction == "bullish":
+            wave1 = prices[1] - prices[0]
+            wave2 = prices[1] - prices[2]
+            wave3 = prices[3] - prices[2]
+            wave4 = prices[3] - prices[4]
+            wave5 = prices[5] - prices[4]
 
-    if direction == "bullish":
-        wave1_len = prices[1] - prices[0]
-        wave2_len = prices[1] - prices[2]
-        wave3_len = prices[3] - prices[2]
-        wave4_len = prices[3] - prices[4]
-        wave5_len = prices[5] - prices[4]
+            if prices[2] < prices[0]:
+                score -= 0.2
+            if wave3 < wave1 * 0.8:
+                score -= 0.3
+            if prices[4] < prices[1] * 0.98:
+                score -= 0.2
+            if wave5 < wave3 * 0.5:
+                score -= 0.1
 
-        if prices[2] < prices[0]:  # Wave 2 invalid retrace
-            if verbose:
-                print("⚠️ Wave 2 retraced below Wave 1 start.")
-            score -= 0.2
-        if wave3_len < wave1_len * 0.8:
-            if verbose:
-                print("⚠️ Wave 3 not extended beyond Wave 1 (weak impulse).")
-            score -= 0.3
-        if prices[4] < prices[1] * 0.98:  # Allow 2% overlap tolerance
-            if verbose:
-                print("⚠️ Wave 4 likely overlaps Wave 1 (within tolerance).")
-            score -= 0.2
-        if wave5_len < wave3_len * 0.5:  # Weak Wave 5
-            if verbose:
-                print("⚠️ Wave 5 is weaker than expected.")
-            score -= 0.1
+        else:  # bearish
+            wave1 = prices[0] - prices[1]
+            wave2 = prices[2] - prices[1]
+            wave3 = prices[2] - prices[3]
+            wave4 = prices[3] - prices[4]
+            wave5 = prices[4] - prices[5]
 
-    else:  # bearish
-        wave1_len = prices[0] - prices[1]
-        wave2_len = prices[2] - prices[1]
-        wave3_len = prices[2] - prices[3]
-        wave4_len = prices[3] - prices[4]
-        wave5_len = prices[4] - prices[5]
+            if prices[2] > prices[0]:
+                score -= 0.2
+            if wave3 < wave1 * 0.8:
+                score -= 0.3
+            if prices[4] > prices[1] * 1.02:
+                score -= 0.2
+            if wave5 < wave3 * 0.5:
+                score -= 0.1
 
-        if prices[2] > prices[0]:
-            if verbose:
-                print("⚠️ Wave 2 retraced above Wave 1 start.")
-            score -= 0.2
-        if wave3_len < wave1_len * 0.8:
-            if verbose:
-                print("⚠️ Wave 3 not extended beyond Wave 1.")
-            score -= 0.3
-        if prices[4] > prices[1] * 1.02:  # 2% overlap tolerance
-            if verbose:
-                print("⚠️ Wave 4 may overlap Wave 1.")
-            score -= 0.2
-        if wave5_len < wave3_len * 0.5:
-            if verbose:
-                print("⚠️ Wave 5 is weak.")
-            score -= 0.1
+        score = max(min(score, 1.0), 0.0)
 
-    score = max(min(score, 1.0), 0.0)
-    valid = score >= 0.6
+        if verbose:
+            print(f"Tested structure at pivots {i}-{i+5}: Score = {score:.2f}")
 
-    if verbose:
-        print(f"✅ Structure score: {score:.2f} => {'VALID' if valid else 'INVALID'}")
+        if score > best_score:
+            best_score = score
+            best_result = {
+                "valid": score >= 0.6,
+                "score": score,
+                "direction": direction,
+                "pivots": p
+            }
 
-    return {
-        "valid": valid,
-        "score": score,
-        "direction": direction,
-        "pivots": p
+    return best_result if best_result else {
+        "valid": False, "score": 0.0, "direction": None, "pivots": all_pivots
     }
+
 
 
 
