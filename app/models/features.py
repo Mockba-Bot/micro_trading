@@ -102,3 +102,17 @@ def get_strategy_name(timeframe, features):
 
     # If no match is found, return None or a default value
     return None
+
+def get_language(lang):
+    languages = {
+        "de": "Deutsch",
+        "en": "English",
+        "es": "Spanish",
+        "fr": "French",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "vi": "Vietnamese",
+        "zh": "Chinese"
+    }
+    
+    return languages.get(lang, None)  # Return None if the language is not found

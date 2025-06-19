@@ -14,7 +14,7 @@ import logging
 from app.models.bucket import download_model
 import json
 from app.models.sendBotMessage import send_bot_message
-from app.models.features import get_strategy_name, get_features_by_indicator
+from app.models.features import get_strategy_name, get_features_by_indicator, get_language
 from base58 import b58decode
 from base64 import urlsafe_b64encode
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -537,8 +537,12 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
             data_json = json.dumps(data.tail(100).to_dict(orient='records'))
             order_book_snapshot_json = json.dumps(order_book_snapshot_df.to_dict(orient='records'))
 
+            # get the language for the bot
+            language = get_language(target_lang)
+
             # --- Generate Professional Prompt ---
             prompt = f"""
+            **Language:** Respond in {language} language.
             **Task:** Generate a professional trading analysis for {asset} {interval} with {leverage}x leverage in the exact format specified below and optimize for Telegram.
             
             **Contextual Preference:** If technical indicators, model signals, or trend data point toward a clear bullish or bearish setup, prioritize a LONG or SHORT recommendation over HOLD. HOLD should only be used if signals are genuinely conflicting or inconclusive. Be decisive when confidence is medium to high.
@@ -636,12 +640,11 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
 
             if response.status_code == 200:
                 analysis = response.json()["choices"][0]["message"]["content"]
-                analysis_translated = translate(analysis, target_lang)
-
+                
                 # Store in Redis for 20 minutes (1200 seconds)
                 await redis_client.set(cache_key, analysis, ex=1200)
 
-                await send_bot_message(token, analysis_translated)
+                await send_bot_message(token, analysis)
                 print("✅ Analysis sent successfully!")
             else:
                 print(f"❌ Error in API response: {response.status_code} - {response.text}")

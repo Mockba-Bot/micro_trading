@@ -13,7 +13,7 @@ import logging
 from app.models.bucket import download_model
 import json
 from app.models.sendBotMessage import send_bot_message
-from app.models.features import get_features_by_indicator
+from app.models.features import get_features_by_indicator, get_language
 from base58 import b58decode
 from base64 import urlsafe_b64encode
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -688,7 +688,11 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
             data['predicted'] = y_custom
             current_prediction = data['predicted'].iloc[-1]
 
+            # get the language for the bot
+            language = get_language(target_lang)
+
             prompt = f"""
+            **Language:** Respond in {language} language.
             🌟 *Advanced Trading Signal - {asset} {interval}* 🌟
             💰 Free Collateral: ${free_colateral:,.2f} | ⚖️ Leverage: {leverage}x
 
@@ -751,12 +755,11 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
 
             if response.status_code == 200:
                 analysis = response.json()["choices"][0]["message"]["content"]
-                analysis_translated = translate(analysis, target_lang).replace("###", "").strip()
 
                 # Store in Redis for 20 minutes (1200 seconds)
                 await redis_client.set(cache_key, analysis, ex=1200)
 
-                await send_bot_message(token, analysis_translated)
+                await send_bot_message(token, analysis)
                 print("✅ Analysis sent successfully!")
             else:
                 print(f"❌ Error in API response: {response.status_code} - {response.text}")

@@ -1,9 +1,6 @@
 import sys
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.dates import DateFormatter
-import mplfinance as mpf
 import time
 import urllib.parse
 from dotenv import load_dotenv
@@ -12,6 +9,7 @@ from base64 import urlsafe_b64encode
 import os
 import joblib
 from app.models.bucket import download_model
+from app.models.features import get_features_by_indicator, get_language
 from deep_translator import GoogleTranslator
 import requests
 import redis.asyncio as redis
@@ -340,10 +338,14 @@ async def analyze_intervals(asset, token, interval, target_lang):
             predicted_labels_json = json.dumps(predicted_labels.tolist())
             # print(f"Predicted labels: {predicted_labels_json}")
 
+             # get the language for the bot
+            language = get_language(target_lang)
+
             #######################################################################################
             #######################################################################################
             # Step 4: Send to DeepSeek API
             prompt = f"""
+            **Language:** Respond in {language} language.
             **Task:** Generate a professional Elliott Wave analysis for {asset} ({interval}) with ML confirmation, optimized for Telegram traders.
 
             ###Input Data:
@@ -445,7 +447,7 @@ async def analyze_intervals(asset, token, interval, target_lang):
 
         return analysis_translated
     else:
-        message = f"❌ Model not found for {asset} {interval} with features {features}"
+        message = f"❌ Model not found for {asset} {interval}"
         translated_message = translate(message, target_lang)
         await send_bot_message(token, translated_message)
         return translate(f"❌ Model not found for {asset} {interval}", target_lang)        
