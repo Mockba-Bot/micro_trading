@@ -1,4 +1,3 @@
-import sys
 import numpy as np
 import pandas as pd
 import time
@@ -8,8 +7,8 @@ from base58 import b58decode
 from base64 import urlsafe_b64encode
 import os
 import joblib
-from app.models.bucket import download_model
-from app.models.features import get_features_by_indicator, get_language
+from app.models.bucket import download_model, is_model_fresh
+from app.models.features import get_language
 from deep_translator import GoogleTranslator
 import requests
 import redis.asyncio as redis
@@ -283,174 +282,159 @@ async def analyze_intervals(asset, token, interval, target_lang):
     # --- Try retrieving from Redis ---
     cached = await redis_client.get(cache_key)
     if cached:
-        analysis_translated = translate(cached.decode(), target_lang)
-        await send_bot_message(token, analysis_translated)
+        await send_bot_message(token, cached.decode())
         return cached.decode()
-
 
     MODEL_KEY = f'Mockba/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
     local_model_path = f'temp/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
+    model_downloaded = False
 
-
-    if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-        try:
-            data = fetch_historical_orderly(asset, interval)
-
-            # 🔍 Wave structure sanity check
-            wave_result = is_valid_elliott_structure_from_pivots(data, verbose=True)
-            if not wave_result["valid"]:
-                message = (
-                    f"⚠️ Weak or invalid Elliott structure for {asset} ({interval})\n"
-                    f"Score: {wave_result['score']:.2f} | Direction: {wave_result['direction'] or 'unknown'}"
-                )
-                await send_bot_message(token, translate(message, target_lang))
-                # You can still proceed if you want ML to analyze anyway
-                # return message  # Or comment this to allow fallback to ML prediction
-
-            # Normalize
-            scaler = MinMaxScaler(feature_range=(0, 1))
-            scaled_data = scaler.fit_transform(data['close'].values.reshape(-1, 1))
-
-            X, Y = create_rf_dataset(scaled_data, look_back)
-            X = X.reshape(X.shape[0], -1)
-
-            model = joblib.load(local_model_path)
-            predictions = model.predict(X)
-
-            # Predict future prices
-            future_inputs = X[-1].reshape(1, -1)
-            future_predictions = []
-            for _ in range(future_steps):
-                future_price = model.predict(future_inputs)
-                future_predictions.append(future_price[0])
-                future_inputs = np.roll(future_inputs, -1)
-                future_inputs[0, -1] = future_price
-
-            future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
-            predicted_labels = (predictions > np.mean(predictions)).astype(int)
-
-            # --- Step 1: Get data ---
-            data_json = json.dumps(data.to_dict(orient='records'))
-            # --- Step 2: Future prediction ---
-            future_predictions_json = json.dumps(future_predictions.tolist())
-            # print(f"Future predictions: {future_predictions_json}")
-            # --- Step 3: PRedicted labels ---
-            predicted_labels_json = json.dumps(predicted_labels.tolist())
-            # print(f"Predicted labels: {predicted_labels_json}")
-
-             # get the language for the bot
-            language = get_language(target_lang)
-
-            #######################################################################################
-            #######################################################################################
-            # Step 4: Send to DeepSeek API
-            prompt = f"""
-            **Language:** Respond in {language} language.
-            **Task:** Generate a professional Elliott Wave analysis for {asset} ({interval}) with ML confirmation, optimized for Telegram traders.
-
-            ###Input Data:
-            1. Price Action:
-            {data_json}
-
-            2. ML Signals:
-            - Trend: {future_predictions_json}
-            - Confidence: {predicted_labels_json}
-
-            ###Analysis Rules:
-            Explanation
-            1 [2-3 sentences explaining the analysis]
-
-            2. Wave Validation:
-            - ✅ Valid if:
-                - Wave 2 stays above Wave 1 start
-                - Wave 3 is longest impulse wave
-                - Wave 4 doesn't enter Wave 1 territory
-            - ❌ Invalid if any rule breaks
-
-            3. ML Integration:
-            - Highlight confidence-weighted conflicts
-            - Flag high-probability reversals
-
-            Output Format:
-            🌊 {asset} {interval} | Elliot Waves Analysis
-
-            🔍 Pattern Status: 🟢 Valid | 🔴 Invalid  
-            - Wave 1: [Start] → [End]  
-            - Wave 2: Held at [Price] (X% pullback)  
-            - Wave 3: [Current] → [Target]  
-            - Next Phase: [Wave 4/5 or A-B-C]  
-
-            📊 Key Levels:  
-            - Buy Zone: [Level]  
-            - Take Profit: [Level]  
-            - Stop Loss: [Level]  
-
-            🤖 ML Cross-Check:  
-            - Trend: [Bullish/Bearish] (X% confidence)  
-            - Alert: [None/"Warning: ML contradicts Wave 5"]  
-
-            💬 Insight:  
-            "The current wave structure suggests [continuation/reversal] is likely, with ML providing [strong/weak] confirmation. The critical level to watch is [Price], where we expect [description of expected price action]. This creates a [high/medium] probability trading opportunity."
-
-            🚀 Final Verdict:  
-            "Based on the wave pattern and ML alignment, the recommended action is to [specific instruction] with defined risk management at [Level]. The next confirmation signal would be [price/condition], expected within [timeframe]."
-
-            Rules:
-            1. No markdown (**, `, ###, etc)
-            2. Use simple dashes (-) for bullets
-            3. Keep decimals consistent (2 places)
-            """
-                    
-
-            # Send to DeepSeek API
-            # For your use case (temperature=0.3):
-            # Optimal for reliable, repeatable technical analysis.
-            # Sacrifices creativity for accuracy and consistency.
-            response = requests.post(
-                "https://api.deepseek.com/v1/chat/completions",  # Verify the correct endpoint
-                json={
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "temperature": 0.3  # Lower = more deterministic
-                },
-                headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
-            )
-
-            if response.status_code == 200:
-                analysis = response.json()["choices"][0]["message"]["content"]
-                analysis_translated = translate(analysis, target_lang)
-
-                # Store in Redis for 20 minutes (1200 seconds)
-                await redis_client.set(cache_key, analysis, ex=1200)
-
-                await send_bot_message(token, analysis_translated)
-                # print(analysis_translated)
-            else:
-                print(f"Error: {response.status_code}, {response.text}")
-        
-        except Exception as e:
-            logger.error(f"Error processing {interval}: {e}")
-            await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))
-
-        finally:
-            if os.path.exists(local_model_path):
-                os.remove(local_model_path)   
-
-        return analysis_translated
+    # ✅ Check local model freshness or download
+    if not is_model_fresh(local_model_path):
+        if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+            model_downloaded = True
+        else:
+            message = f"❌ Model not found for {asset} {interval}"
+            translated_message = translate(message, target_lang)
+            await send_bot_message(token, translated_message)
+            return translated_message
     else:
-        message = f"❌ Model not found for {asset} {interval}"
-        translated_message = translate(message, target_lang)
-        await send_bot_message(token, translated_message)
-        return translate(f"❌ Model not found for {asset} {interval}", target_lang)        
+        model_downloaded = True
+
+    # ✅ Now always run analysis regardless of fresh or just-downloaded model
+    try:
+        data = fetch_historical_orderly(asset, interval)
+
+        # 🔍 Wave structure sanity check
+        wave_result = is_valid_elliott_structure_from_pivots(data, verbose=True)
+        if not wave_result["valid"]:
+            message = (
+                f"⚠️ Weak or invalid Elliott structure for {asset} ({interval})\n"
+                f"Score: {wave_result['score']:.2f} | Direction: {wave_result['direction'] or 'unknown'}"
+            )
+            await send_bot_message(token, translate(message, target_lang))
+            # Optional: return here to skip ML prediction if invalid
+
+        # Normalize
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(data['close'].values.reshape(-1, 1))
+
+        X, Y = create_rf_dataset(scaled_data, look_back)
+        X = X.reshape(X.shape[0], -1)
+
+        model = joblib.load(local_model_path)
+        predictions = model.predict(X)
+
+        # Predict future prices
+        future_inputs = X[-1].reshape(1, -1)
+        future_predictions = []
+        for _ in range(future_steps):
+            future_price = model.predict(future_inputs)
+            future_predictions.append(future_price[0])
+            future_inputs = np.roll(future_inputs, -1)
+            future_inputs[0, -1] = future_price
+
+        future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
+        predicted_labels = (predictions > np.mean(predictions)).astype(int)
+
+        data_json = json.dumps(data.to_dict(orient='records'))
+        future_predictions_json = json.dumps(future_predictions.tolist())
+        predicted_labels_json = json.dumps(predicted_labels.tolist())
+        language = get_language(target_lang)
+
+        prompt = f"""
+        **Language:** Respond in {language} language.
+        **Task:** Generate a professional Elliott Wave analysis for {asset} ({interval}) with ML confirmation, optimized for Telegram traders.
+
+        ###Input Data:
+        1. Price Action:
+        {data_json}
+
+        2. ML Signals:
+        - Trend: {future_predictions_json}
+        - Confidence: {predicted_labels_json}
+
+        ###Analysis Rules:
+        Explanation
+        1 [2-3 sentences explaining the analysis]
+
+        2. Wave Validation:
+        - ✅ Valid if:
+            - Wave 2 stays above Wave 1 start
+            - Wave 3 is longest impulse wave
+            - Wave 4 doesn't enter Wave 1 territory
+        - ❌ Invalid if any rule breaks
+
+        3. ML Integration:
+        - Highlight confidence-weighted conflicts
+        - Flag high-probability reversals
+
+        Output Format:
+        🌊 {asset} {interval} | Elliot Waves Analysis
+
+        🔍 Pattern Status: 🟢 Valid | 🔴 Invalid  
+        - Wave 1: [Start] → [End]  
+        - Wave 2: Held at [Price] (X% pullback)  
+        - Wave 3: [Current] → [Target]  
+        - Next Phase: [Wave 4/5 or A-B-C]  
+
+        📊 Key Levels:  
+        - Buy Zone: [Level]  
+        - Take Profit: [Level]  
+        - Stop Loss: [Level]  
+
+        🤖 ML Cross-Check:  
+        - Trend: [Bullish/Bearish] (X% confidence)  
+        - Alert: [None/"Warning: ML contradicts Wave 5"]  
+
+        💬 Insight:  
+        "The current wave structure suggests [continuation/reversal] is likely, with ML providing [strong/weak] confirmation. The critical level to watch is [Price], where we expect [description of expected price action]. This creates a [high/medium] probability trading opportunity."
+
+        🚀 Final Verdict:  
+        "Based on the wave pattern and ML alignment, the recommended action is to [specific instruction] with defined risk management at [Level]. The next confirmation signal would be [price/condition], expected within [timeframe]."
+
+        Rules:
+        1. No markdown (**, `, ###, etc)
+        2. Use simple dashes (-) for bullets
+        3. Keep decimals consistent (2 places)
+        """
+
+        response = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.3
+            },
+            headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
+        )
+
+        if response.status_code == 200:
+            analysis = response.json()["choices"][0]["message"]["content"]
+            await redis_client.set(cache_key, analysis, ex=1200)
+            await send_bot_message(token, analysis)
+        else:
+            print(f"Error: {response.status_code}, {response.text}")
+
+    except Exception as e:
+        logger.error(f"Error processing {interval}: {e}")
+        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))
+
+    finally:
+        if model_downloaded and not is_model_fresh(local_model_path):
+            os.remove(local_model_path)
+
+    return analysis
+
     
                
 

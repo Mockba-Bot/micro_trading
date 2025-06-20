@@ -10,7 +10,7 @@ import joblib  # Library for model serialization
 import requests
 import redis.asyncio as redis
 import logging
-from app.models.bucket import download_model
+from app.models.bucket import download_model, is_model_fresh
 import json
 from app.models.sendBotMessage import send_bot_message
 from app.models.features import get_features_by_indicator, get_language
@@ -599,184 +599,189 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
         await send_bot_message(token, analysis_translated)
         return cached.decode()
 
-    if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-        try:
-            # --- Data Preparation ---
-            data = fetch_historical_orderly(asset, interval)
-            if data is None or data.empty:
-               print(f"❌ No historical data returned for {asset} {interval}")
-               return None
-                
-            asset_info = await fetch_asset_info(asset)
-            prob_engine = ProbabilityEngine(asset_info)
-            current_funding = await get_funding_rate(asset)
-            
-            # --- Model Predictions ---
-            model_metadata = joblib.load(local_model_path)
-            model = model_metadata["model"]
-            used_features = model_metadata.get("used_features", [])
-
-            missing_features = [f for f in used_features if f not in data.columns]
-            if missing_features:
-                data = add_indicators(data, missing_features)
-
-            # Dynamically extract indicators only if available
-            rsi_value = data['rsi_14'].iloc[-1] if 'rsi_14' in features and 'rsi_14' in data.columns else 'N/A'
-            macd_latest = data['macd'].iloc[-1] if 'macd' in features and 'macd' in data.columns else None
-            macd_signal_latest = data['macd_signal'].iloc[-1] if 'macd_signal' in features and 'macd_signal' in data.columns else None
-            macd_status = (
-                'Bullish' if macd_latest is not None and macd_signal_latest is not None and macd_latest > macd_signal_latest
-                else 'Bearish' if macd_latest is not None and macd_signal_latest is not None
-                else 'N/A'
-            )
-
-            # Build indicator snapshot for prompt
-            indicator_snapshot = ""
-            if 'rsi_14' in features:
-                indicator_snapshot += f"• RSI(14): {rsi_value}\n"
-            if 'macd' in features and 'macd_signal' in features:
-                indicator_snapshot += f"• MACD: {macd_latest:.2f} vs Signal: {macd_signal_latest:.2f} → {macd_status}\n"
-            indicator_snapshot += f"• Volume (latest): {data['volume'].iloc[-1]:,.0f}"
-
-            # Build guidance string
-            confirmation_guidance = ""
-            if 'rsi_14' in features:
-                confirmation_guidance += "- If RSI is below 30, do NOT recommend 'RSI > 60/70' as confirmation.\n"
-            if 'macd' in features and 'macd_signal' in features:
-                confirmation_guidance += "- If MACD is bearish, do not suggest bullish divergence.\n"
-            confirmation_guidance += "- Reference only actual values shown in the snapshot."
-
-            data = data[used_features].dropna().copy()
-
-            y_proba = model.predict_proba(data[features])
-            proba_df = pd.DataFrame(y_proba, columns=model.classes_)
-
-            data = prob_engine.calculate_advanced_scenarios(data)
-            scenario_probs = {
-                'long': {k: data[f'long_{k.replace(".", "").replace("%", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']},
-                'short': {k: data[f'short_{k.replace(".", "").replace("%", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']}
-            }
-
-
-            kelly_sizes = {
-                side: {
-                    k: prob_engine.dynamic_kelly(prob, float(k.strip('%')) * 5, leverage, current_funding)
-                    for k, prob in probs.items()
-                } for side, probs in scenario_probs.items()
-            }
-
-            confidence_level, confidence_score = prob_engine.calculate_confidence(proba_df, current_funding)
-            liq_risk = prob_engine.monte_carlo_liquidation(
-                price=data['close'].iloc[-1],
-                atr=data['atr_14'].iloc[-1],
-                position_size=max(max(kelly_sizes['long'].values()), max(kelly_sizes['short'].values())),
-                leverage=leverage
-            )
-
-            target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
-            if market_bias == 'bullish':
-                target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
-            elif market_bias == 'bearish':
-                target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}
-
-            n_samples = len(proba_df)
-            target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
-            y_custom = np.zeros(n_samples, dtype=int)
-            for cls in [-1, 1]:
-                top_indices = proba_df[cls].nlargest(target_counts[cls]).index
-                y_custom[top_indices] = cls
-            data['predicted'] = y_custom
-            current_prediction = data['predicted'].iloc[-1]
-
-            # get the language for the bot
-            language = get_language(target_lang)
-
-            prompt = f"""
-            **Language:** Respond in {language} language.
-            🌟 *Advanced Trading Signal - {asset} {interval}* 🌟
-            💰 Free Collateral: ${free_colateral:,.2f} | ⚖️ Leverage: {leverage}x
-
-            🔷 *Price Action*
-            📈 Last Price: ${data['close'].iloc[-1]:,.2f}
-            🛡️ Support: ${data['low'].tail(10).min():,.2f}
-            🚀 Resistance: ${data['high'].tail(10).max():,.2f}
-
-            🎯 *Probability Matrix*
-            👉 *LONG Targets*:
-            {chr(10).join([f"{k} → {scenario_probs['long'][k]:.1%} | 🎯 Size: {kelly_sizes['long'][k]:.2f}x" for k in scenario_probs['long']])}
-
-            👉 *SHORT Targets*:
-            {chr(10).join([f"{k} → {scenario_probs['short'][k]:.1%} | 🎯 Size: {kelly_sizes['short'][k]:.2f}x" for k in scenario_probs['short']])}
-
-            ⚡ *Signal*: {'🟢 STRONG LONG' if current_prediction == 1 else '🔴 STRONG SHORT' if current_prediction == -1 else '🟡 NEUTRAL'} 
-            📊 Confidence: {confidence_score}% {'✅ High' if confidence_score > 70 else '⚠️ Medium' if confidence_score > 50 else '❌ Low'}
-            🔄 Market Bias: {market_bias.upper()} {'🐂' if market_bias == 'bullish' else '🐻' if market_bias == 'bearish' else '🦉'}
-
-            💎 *Strategic Recommendation*
-            {"🚀 AGGRESSIVE LONG" if scenario_probs['long']['1.0%'] > 0.7 else "🎯 PREFER SHORTS" if scenario_probs['short']['0.5%'] > 0.7 else "🛑 WAIT FOR BETTER ENTRY"}
-
-            📌 *Indicator Snapshot*
-            {indicator_snapshot}
-
-            💡 *Model Instruction*  
-            Use the indicator snapshot above when suggesting confirmation conditions.  
-            {confirmation_guidance}
-
-            ⚠️ *Risk Assessment*
-            💀 Liquidation Risk: {liq_risk:.1%} {'(High)' if liq_risk > 0.3 else '(Medium)' if liq_risk > 0.15 else '(Low)'}
-            💸 Funding Rate: {current_funding*100:+.2f}% {'(Costly)' if current_funding > 0.0005 else '(Favorable)' if current_funding < -0.0002 else '(Neutral)'}
-            🛡️ Max Safe Leverage: {min(1/asset_info['base_imr'], leverage):.1f}x
-
-            🔔 *Final Notes*
-            • Next update in: {interval}
-            • Max position: {min(max(kelly_sizes['long'].values()) + max(kelly_sizes['short'].values()), leverage):.1f}x
-            • 📅 Data points: {len(data)} samples
-            • ⚠️ Always use stop-loss!
-            """
-
-            response = requests.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                json={
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "Respond in this exact structure:\n\n📊 DIRECTIONAL EDGE ANALYSIS\n[LONG/SHORT] | Best Target: X.X% Move\n┌─────────┬────────────┬────────────┬────────────┐\n│ Target  │ Win Prob   │ Kelly Size │ Edge       │\n├─────────┼────────────┼────────────┼────────────┤\n│ 0.3%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n│ 0.5%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n└─────────┴────────────┴────────────┴────────────┘\n\n🎯 EXECUTION SUMMARY\n• Preferred Direction: [STRONG LONG/PREFER SHORTS/NEUTRAL]\n• Entry: $XXX-$XXX (Confirm with: [Indicator1+Indicator2])\n• Exit: Take-Profit at X.X% (X.X% position), Stop-Loss at $XXX\n\n⚠️ RISK PROFILE\n• Max Position: X.X% of capital\n• Liquidation Risk: X.X%\n• Funding Impact: ±X.XX%"
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "temperature": 0.2
-                },
-                headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
-            )
-
-            if response.status_code == 200:
-                analysis = response.json()["choices"][0]["message"]["content"]
-
-                # Store in Redis for 20 minutes (1200 seconds)
-                await redis_client.set(cache_key, analysis, ex=1200)
-
-                await send_bot_message(token, analysis)
-                print("✅ Analysis sent successfully!")
-            else:
-                print(f"❌ Error in API response: {response.status_code} - {response.text}")
-                analysis_translated = translate(f"❌ Error API response: {response.status_code} - {response.text}", target_lang)
-                await send_bot_message(token, analysis_translated)   
-
-        except Exception as e:
-            logger.error(f"Error processing {interval}: {e}")
-            await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))         
-          
-        finally:
-            if os.path.exists(local_model_path):
-                os.remove(local_model_path)
-
-        return analysis_translated
+     # ✅ Check if model is fresh or needs download
+    if not is_model_fresh(local_model_path):
+        if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+            model_downloaded = True
+        else:
+            message = f"❌ Model not found for {asset} {interval} with features {features}"
+            translated_message = translate(message, target_lang)
+            await send_bot_message(token, translated_message)
+            return translated_message
     else:
-        message = f"❌ Model not found for {asset} {interval} with features {features}"
-        translated_message = translate(message, target_lang)
-        await send_bot_message(token, translated_message)
-        return translate(f"❌ Model not found for {asset} {interval} with features {features}", target_lang)
+        model_downloaded = True
+    try:
+        # --- Data Preparation ---
+        data = fetch_historical_orderly(asset, interval)
+        if data is None or data.empty:
+            print(f"❌ No historical data returned for {asset} {interval}")
+            return None
+            
+        asset_info = await fetch_asset_info(asset)
+        prob_engine = ProbabilityEngine(asset_info)
+        current_funding = await get_funding_rate(asset)
+        
+        # --- Model Predictions ---
+        model_metadata = joblib.load(local_model_path)
+        model = model_metadata["model"]
+        used_features = model_metadata.get("used_features", [])
+
+        missing_features = [f for f in used_features if f not in data.columns]
+        if missing_features:
+            data = add_indicators(data, missing_features)
+
+        # Dynamically extract indicators only if available
+        rsi_value = data['rsi_14'].iloc[-1] if 'rsi_14' in features and 'rsi_14' in data.columns else 'N/A'
+        macd_latest = data['macd'].iloc[-1] if 'macd' in features and 'macd' in data.columns else None
+        macd_signal_latest = data['macd_signal'].iloc[-1] if 'macd_signal' in features and 'macd_signal' in data.columns else None
+        macd_status = (
+            'Bullish' if macd_latest is not None and macd_signal_latest is not None and macd_latest > macd_signal_latest
+            else 'Bearish' if macd_latest is not None and macd_signal_latest is not None
+            else 'N/A'
+        )
+
+        # Build indicator snapshot for prompt
+        indicator_snapshot = ""
+        if 'rsi_14' in features:
+            indicator_snapshot += f"• RSI(14): {rsi_value}\n"
+        if 'macd' in features and 'macd_signal' in features:
+            indicator_snapshot += f"• MACD: {macd_latest:.2f} vs Signal: {macd_signal_latest:.2f} → {macd_status}\n"
+        indicator_snapshot += f"• Volume (latest): {data['volume'].iloc[-1]:,.0f}"
+
+        # Build guidance string
+        confirmation_guidance = ""
+        if 'rsi_14' in features:
+            confirmation_guidance += "- If RSI is below 30, do NOT recommend 'RSI > 60/70' as confirmation.\n"
+        if 'macd' in features and 'macd_signal' in features:
+            confirmation_guidance += "- If MACD is bearish, do not suggest bullish divergence.\n"
+        confirmation_guidance += "- Reference only actual values shown in the snapshot."
+
+        data = data[used_features].dropna().copy()
+
+        y_proba = model.predict_proba(data[features])
+        proba_df = pd.DataFrame(y_proba, columns=model.classes_)
+
+        data = prob_engine.calculate_advanced_scenarios(data)
+        scenario_probs = {
+            'long': {k: data[f'long_{k.replace(".", "").replace("%", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']},
+            'short': {k: data[f'short_{k.replace(".", "").replace("%", "")}_prob'].mean() for k in ['0.3%', '0.5%', '1.0%', '1.5%', '2.0%']}
+        }
+
+
+        kelly_sizes = {
+            side: {
+                k: prob_engine.dynamic_kelly(prob, float(k.strip('%')) * 5, leverage, current_funding)
+                for k, prob in probs.items()
+            } for side, probs in scenario_probs.items()
+        }
+
+        confidence_level, confidence_score = prob_engine.calculate_confidence(proba_df, current_funding)
+        liq_risk = prob_engine.monte_carlo_liquidation(
+            price=data['close'].iloc[-1],
+            atr=data['atr_14'].iloc[-1],
+            position_size=max(max(kelly_sizes['long'].values()), max(kelly_sizes['short'].values())),
+            leverage=leverage
+        )
+
+        target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
+        if market_bias == 'bullish':
+            target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
+        elif market_bias == 'bearish':
+            target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}
+
+        n_samples = len(proba_df)
+        target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
+        y_custom = np.zeros(n_samples, dtype=int)
+        for cls in [-1, 1]:
+            top_indices = proba_df[cls].nlargest(target_counts[cls]).index
+            y_custom[top_indices] = cls
+        data['predicted'] = y_custom
+        current_prediction = data['predicted'].iloc[-1]
+
+        # get the language for the bot
+        language = get_language(target_lang)
+
+        prompt = f"""
+        **Language:** Respond in {language} language.
+        🌟 *Advanced Trading Signal - {asset} {interval}* 🌟
+        💰 Free Collateral: ${free_colateral:,.2f} | ⚖️ Leverage: {leverage}x
+
+        🔷 *Price Action*
+        📈 Last Price: ${data['close'].iloc[-1]:,.2f}
+        🛡️ Support: ${data['low'].tail(10).min():,.2f}
+        🚀 Resistance: ${data['high'].tail(10).max():,.2f}
+
+        🎯 *Probability Matrix*
+        👉 *LONG Targets*:
+        {chr(10).join([f"{k} → {scenario_probs['long'][k]:.1%} | 🎯 Size: {kelly_sizes['long'][k]:.2f}x" for k in scenario_probs['long']])}
+
+        👉 *SHORT Targets*:
+        {chr(10).join([f"{k} → {scenario_probs['short'][k]:.1%} | 🎯 Size: {kelly_sizes['short'][k]:.2f}x" for k in scenario_probs['short']])}
+
+        ⚡ *Signal*: {'🟢 STRONG LONG' if current_prediction == 1 else '🔴 STRONG SHORT' if current_prediction == -1 else '🟡 NEUTRAL'} 
+        📊 Confidence: {confidence_score}% {'✅ High' if confidence_score > 70 else '⚠️ Medium' if confidence_score > 50 else '❌ Low'}
+        🔄 Market Bias: {market_bias.upper()} {'🐂' if market_bias == 'bullish' else '🐻' if market_bias == 'bearish' else '🦉'}
+
+        💎 *Strategic Recommendation*
+        {"🚀 AGGRESSIVE LONG" if scenario_probs['long']['1.0%'] > 0.7 else "🎯 PREFER SHORTS" if scenario_probs['short']['0.5%'] > 0.7 else "🛑 WAIT FOR BETTER ENTRY"}
+
+        📌 *Indicator Snapshot*
+        {indicator_snapshot}
+
+        💡 *Model Instruction*  
+        Use the indicator snapshot above when suggesting confirmation conditions.  
+        {confirmation_guidance}
+
+        ⚠️ *Risk Assessment*
+        💀 Liquidation Risk: {liq_risk:.1%} {'(High)' if liq_risk > 0.3 else '(Medium)' if liq_risk > 0.15 else '(Low)'}
+        💸 Funding Rate: {current_funding*100:+.2f}% {'(Costly)' if current_funding > 0.0005 else '(Favorable)' if current_funding < -0.0002 else '(Neutral)'}
+        🛡️ Max Safe Leverage: {min(1/asset_info['base_imr'], leverage):.1f}x
+
+        🔔 *Final Notes*
+        • Next update in: {interval}
+        • Max position: {min(max(kelly_sizes['long'].values()) + max(kelly_sizes['short'].values()), leverage):.1f}x
+        • 📅 Data points: {len(data)} samples
+        • ⚠️ Always use stop-loss!
+        """
+
+        response = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Respond in this exact structure:\n\n📊 DIRECTIONAL EDGE ANALYSIS\n[LONG/SHORT] | Best Target: X.X% Move\n┌─────────┬────────────┬────────────┬────────────┐\n│ Target  │ Win Prob   │ Kelly Size │ Edge       │\n├─────────┼────────────┼────────────┼────────────┤\n│ 0.3%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n│ 0.5%    │ XX.X%      │ X.XXx      │ [✅/⚠️/❌] │\n└─────────┴────────────┴────────────┴────────────┘\n\n🎯 EXECUTION SUMMARY\n• Preferred Direction: [STRONG LONG/PREFER SHORTS/NEUTRAL]\n• Entry: $XXX-$XXX (Confirm with: [Indicator1+Indicator2])\n• Exit: Take-Profit at X.X% (X.X% position), Stop-Loss at $XXX\n\n⚠️ RISK PROFILE\n• Max Position: X.X% of capital\n• Liquidation Risk: X.X%\n• Funding Impact: ±X.XX%"
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.2
+            },
+            headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
+        )
+
+        if response.status_code == 200:
+            analysis = response.json()["choices"][0]["message"]["content"]
+
+            # Store in Redis for 20 minutes (1200 seconds)
+            await redis_client.set(cache_key, analysis, ex=1200)
+
+            await send_bot_message(token, analysis)
+            print("✅ Analysis sent successfully!")
+        else:
+            print(f"❌ Error in API response: {response.status_code} - {response.text}")
+            analysis_translated = translate(f"❌ Error API response: {response.status_code} - {response.text}", target_lang)
+            await send_bot_message(token, analysis_translated)   
+
+    except Exception as e:
+        logger.error(f"Error processing {interval}: {e}")
+        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))         
+        
+    finally:
+        if model_downloaded and not is_model_fresh(local_model_path):
+            os.remove(local_model_path)
+
+    return analysis

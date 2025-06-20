@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 import glob
+import time
 
 # Load environment variables from the .env file
 load_dotenv(dotenv_path=".env.micro.trading")
@@ -52,3 +53,14 @@ def upload_model(bucket_name, key, local_path):
         print(f"Model uploaded to {bucket_name}/{key}")
     except Exception as e:
         print(f"Error uploading model: {e}")
+
+# Cache implementation for bucket models
+# 
+# 
+MODEL_CACHE_DURATION = 86400  # 24 hours in seconds
+
+def is_model_fresh(path: str) -> bool:
+    if not os.path.exists(path):
+        return False
+    mod_time = os.path.getmtime(path)
+    return (time.time() - mod_time) < MODEL_CACHE_DURATION        

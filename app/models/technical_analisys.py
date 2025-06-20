@@ -11,7 +11,7 @@ import joblib  # Library for model serialization
 import requests
 import redis.asyncio as redis
 import logging
-from app.models.bucket import download_model
+from app.models.bucket import download_model, is_model_fresh
 import json
 from app.models.sendBotMessage import send_bot_message
 from app.models.features import get_strategy_name, get_features_by_indicator, get_language
@@ -483,185 +483,194 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
         return cached.decode()
     
 
-    if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-        try:
-            data = fetch_historical_orderly(asset, interval)
-            
-            # --- Step 1: Analyze data and prepare for prediction ---
-            model_metadata = joblib.load(local_model_path)
-            model = model_metadata["model"]
-            used_features = model_metadata.get("used_features", [])
+    model_downloaded = False
 
-            # Add missing features to the dataset
-            missing_features = [f for f in used_features if f not in data.columns]
-            if missing_features:
-                data = add_indicators(data, missing_features)
-
-            # Ensure dataset contains only trained features and in correct order
-            data = data[used_features].dropna().copy()
-
-            # --- Predict class probabilities
-            y_proba = model.predict_proba(data[features])
-            proba_df = pd.DataFrame(y_proba, columns=model.classes_)
-
-            # --- Generate predictions ---
-            target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
-            if market_bias == 'bullish':
-                target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
-            elif market_bias == 'bearish':
-                target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}
-
-            n_samples = len(proba_df)
-            target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
-
-            y_custom = np.zeros(n_samples, dtype=int)
-            for cls in [-1, 1]:
-                top_indices = proba_df[cls].nlargest(target_counts[cls]).index
-                y_custom[top_indices] = cls
-
-            data['predicted'] = y_custom
-            data['close_pct_change'] = data['close'].pct_change()
-            
-            # Get current market data
-            current_price = data['close'].iloc[-1]
-            last_3_predictions = data['predicted'].tail(3).tolist()
-            current_prediction = data['predicted'].iloc[-1]
-            confidence_score = int(proba_df.max(axis=1).iloc[-1] * 100)
-            confidence_level = "High" if confidence_score > 70 else "Medium" if confidence_score > 50 else "Low"
-
-            # --- Order Book Analysis ---
-            order_book_snapshot = fetch_order_book_snapshot(asset)
-            order_book_snapshot_df = pd.DataFrame(order_book_snapshot)
-            
-            # Prepare data for API
-            data_json = json.dumps(data.tail(100).to_dict(orient='records'))
-            order_book_snapshot_json = json.dumps(order_book_snapshot_df.to_dict(orient='records'))
-
-            # get the language for the bot
-            language = get_language(target_lang)
-
-            # --- Generate Professional Prompt ---
-            prompt = f"""
-            **Language:** Respond in {language} language.
-            **Task:** Generate a professional trading analysis for {asset} {interval} with {leverage}x leverage in the exact format specified below and optimize for Telegram.
-            
-            **Contextual Preference:** If technical indicators, model signals, or trend data point toward a clear bullish or bearish setup, prioritize a LONG or SHORT recommendation over HOLD. HOLD should only be used if signals are genuinely conflicting or inconclusive. Be decisive when confidence is medium to high.
-            
-            ### Required Format:
-            [Asset/Timeframe] Technical Analysis - {feature}
-            🔹 Current Price: {current_price}
-            🔸 Market Phase: [trending/consolidating/reversing]
-            🔸 Signals: 1 Buy, -1 Sell, 0 Hold
-            🔸 Last Signals: {last_3_predictions} → Current: {current_prediction} ({confidence_level} confidence)
-            🔸 Active Indicators: {features}
-
-            📊 Key Indicators (Using: {feature})
-            - [Indicator from {features}]: [value] → [interpretation]
-            - [Indicator from {features}]: [value] → [interpretation]
-
-            📈 Trend Analysis (Based on {[ind for ind in features if 'ema' in ind or 'ma' in ind]})
-            - Direction: [trend_direction] ([strength])
-            - MA Cross: [ema_cross_status]
-            - Volatility: [volatility_level] (using {[ind for ind in features if 'atr' in ind or 'std' in ind]})
-
-            🎯 Critical Levels
-            - Support: [level1], [level2]
-            - Resistance: [level1], [level2]
-
-            ⚡ {leverage}x Trading Signals ({get_strategy_name(interval, features)} Strategy)
-
-            🔵 LONG Setup (Bullish)
-            - Trigger: [condition using {features}]
-            - Entry Zone: [entry_price_range]
-            - TP: [target_price] (+[target_percent]%)
-            - SL: [stop_price] (-[stop_percent]%)
-            - Confidence: [high/medium/low]
-
-            🔴 SHORT Setup (Bearish) 
-            - Trigger: [condition using {features}]
-            - Entry Zone: [entry_price_range]
-            - TP: [target_price] (-[target_percent]%)
-            - SL: [stop_price] (+[stop_percent]%) 
-            - Confidence: [high/medium/low]
-
-            🟡 HOLD Recommendation (Neutral)
-            - Conditions: [market_conditions_for_holding]
-            - Duration: [expected_hold_timeframe]
-            - Next Trigger: [key_level_for_action]
-
-            💰 Leverage Math
-            - Profit Potential: {leverage}×[target_percent]% move = +[potential_profit]%
-            - Risk Exposure: {leverage}×[stop_percent]% move = -[potential_loss]%
-            - Position Size: ≤[recommended_percent]% of capital
-
-            ⚠️ Risk Alert
-            - Immediate Risk: [key_risk_factor]
-            - Liquidation Warning: [nearest_liquidation_zone]
-            - Alternative Strategy: [safer_approach_if_applicable]
-
-            📌 FINAL RECOMMENDATION
-            🎯 Best Action: [LONG/SHORT/HOLD] 
-            🔍 Reason: [2-3_sentence_rationale]
-            ⏱️ Valid Until: [timeframe_or_key_level]
-            📊 Confidence: [high/medium/low]
-
-            ✅ Strengths: [bullish_factors] 
-            ⛔ Weaknesses: [bearish_factors]
-            🔮 Next Decision Point: [key_level/time_event]
-
-            (Not financial advice - DYOR)
-
-            ### Analysis Data:
-            1. Price Action: {data_json}
-            2. Order Book: {order_book_snapshot_json}
-            3. Model Confidence: {confidence_score}/100
-            4. Volume Analysis: [volume_commentary]
-            5. Liquidity: [liquidity_assessment]
-            """
-            # Send to DeepSeek API
-            response = requests.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                json={
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a professional trading analyst specializing in leveraged trading. Generate concise reports in plain text with clear sections. Use emojis for visual organization but no markdown formatting. All numbers to 2 decimals. Focus on leverage-specific risks and opportunities."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "temperature": 0.3
-                },
-                headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
-            )
-
-            if response.status_code == 200:
-                analysis = response.json()["choices"][0]["message"]["content"]
-                
-                # Store in Redis for 20 minutes (1200 seconds)
-                await redis_client.set(cache_key, analysis, ex=1200)
-
-                await send_bot_message(token, analysis)
-                print("✅ Analysis sent successfully!")
-            else:
-                print(f"❌ Error in API response: {response.status_code} - {response.text}")
-                analysis_translated = translate(f"❌ Error API response: {response.status_code} - {response.text}", target_lang)
-                await send_bot_message(token, analysis_translated)
-
-        except Exception as e:
-            logger.error(f"Error processing {interval}: {e}")
-            await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))        
-          
-        finally:
-            if os.path.exists(local_model_path):
-                os.remove(local_model_path)
-
-        return analysis_translated
+    # ✅ Check if model is fresh or needs download
+    if not is_model_fresh(local_model_path):
+        if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+            model_downloaded = True
+        else:
+            message = f"❌ Model not found for {asset} {interval} with features {features}"
+            translated_message = translate(message, target_lang)
+            await send_bot_message(token, translated_message)
+            return translated_message
     else:
-        message = f"❌ Model not found for {asset} {interval} with features {features}"
-        translated_message = translate(message, target_lang)
-        await send_bot_message(token, translated_message)
-        return translate(f"❌ Model not found for {asset} {interval} with features {features}", target_lang)
+        model_downloaded = True
+
+    try:
+        data = fetch_historical_orderly(asset, interval)
+        
+        # --- Step 1: Analyze data and prepare for prediction ---
+        model_metadata = joblib.load(local_model_path)
+        model = model_metadata["model"]
+        used_features = model_metadata.get("used_features", [])
+
+        # Add missing features to the dataset
+        missing_features = [f for f in used_features if f not in data.columns]
+        if missing_features:
+            data = add_indicators(data, missing_features)
+
+        # Ensure dataset contains only trained features and in correct order
+        data = data[used_features].dropna().copy()
+
+        # --- Predict class probabilities
+        y_proba = model.predict_proba(data[features])
+        proba_df = pd.DataFrame(y_proba, columns=model.classes_)
+
+        # --- Generate predictions ---
+        target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
+        if market_bias == 'bullish':
+            target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
+        elif market_bias == 'bearish':
+            target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}
+
+        n_samples = len(proba_df)
+        target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
+
+        y_custom = np.zeros(n_samples, dtype=int)
+        for cls in [-1, 1]:
+            top_indices = proba_df[cls].nlargest(target_counts[cls]).index
+            y_custom[top_indices] = cls
+
+        data['predicted'] = y_custom
+        data['close_pct_change'] = data['close'].pct_change()
+        
+        # Get current market data
+        current_price = data['close'].iloc[-1]
+        last_3_predictions = data['predicted'].tail(3).tolist()
+        current_prediction = data['predicted'].iloc[-1]
+        confidence_score = int(proba_df.max(axis=1).iloc[-1] * 100)
+        confidence_level = "High" if confidence_score > 70 else "Medium" if confidence_score > 50 else "Low"
+
+        # --- Order Book Analysis ---
+        order_book_snapshot = fetch_order_book_snapshot(asset)
+        order_book_snapshot_df = pd.DataFrame(order_book_snapshot)
+        
+        # Prepare data for API
+        data_json = json.dumps(data.tail(100).to_dict(orient='records'))
+        order_book_snapshot_json = json.dumps(order_book_snapshot_df.to_dict(orient='records'))
+
+        # get the language for the bot
+        language = get_language(target_lang)
+
+        # --- Generate Professional Prompt ---
+        prompt = f"""
+        **Language:** Respond in {language} language.
+        **Task:** Generate a professional trading analysis for {asset} {interval} with {leverage}x leverage in the exact format specified below and optimize for Telegram.
+        
+        **Contextual Preference:** If technical indicators, model signals, or trend data point toward a clear bullish or bearish setup, prioritize a LONG or SHORT recommendation over HOLD. HOLD should only be used if signals are genuinely conflicting or inconclusive. Be decisive when confidence is medium to high.
+        
+        ### Required Format:
+        [Asset/Timeframe] Technical Analysis - {feature}
+        🔹 Current Price: {current_price}
+        🔸 Market Phase: [trending/consolidating/reversing]
+        🔸 Signals: 1 Buy, -1 Sell, 0 Hold
+        🔸 Last Signals: {last_3_predictions} → Current: {current_prediction} ({confidence_level} confidence)
+        🔸 Active Indicators: {features}
+
+        📊 Key Indicators (Using: {feature})
+        - [Indicator from {features}]: [value] → [interpretation]
+        - [Indicator from {features}]: [value] → [interpretation]
+
+        📈 Trend Analysis (Based on {[ind for ind in features if 'ema' in ind or 'ma' in ind]})
+        - Direction: [trend_direction] ([strength])
+        - MA Cross: [ema_cross_status]
+        - Volatility: [volatility_level] (using {[ind for ind in features if 'atr' in ind or 'std' in ind]})
+
+        🎯 Critical Levels
+        - Support: [level1], [level2]
+        - Resistance: [level1], [level2]
+
+        ⚡ {leverage}x Trading Signals ({get_strategy_name(interval, features)} Strategy)
+
+        🔵 LONG Setup (Bullish)
+        - Trigger: [condition using {features}]
+        - Entry Zone: [entry_price_range]
+        - TP: [target_price] (+[target_percent]%)
+        - SL: [stop_price] (-[stop_percent]%)
+        - Confidence: [high/medium/low]
+
+        🔴 SHORT Setup (Bearish) 
+        - Trigger: [condition using {features}]
+        - Entry Zone: [entry_price_range]
+        - TP: [target_price] (-[target_percent]%)
+        - SL: [stop_price] (+[stop_percent]%) 
+        - Confidence: [high/medium/low]
+
+        🟡 HOLD Recommendation (Neutral)
+        - Conditions: [market_conditions_for_holding]
+        - Duration: [expected_hold_timeframe]
+        - Next Trigger: [key_level_for_action]
+
+        💰 Leverage Math
+        - Profit Potential: {leverage}×[target_percent]% move = +[potential_profit]%
+        - Risk Exposure: {leverage}×[stop_percent]% move = -[potential_loss]%
+        - Position Size: ≤[recommended_percent]% of capital
+
+        ⚠️ Risk Alert
+        - Immediate Risk: [key_risk_factor]
+        - Liquidation Warning: [nearest_liquidation_zone]
+        - Alternative Strategy: [safer_approach_if_applicable]
+
+        📌 FINAL RECOMMENDATION
+        🎯 Best Action: [LONG/SHORT/HOLD] 
+        🔍 Reason: [2-3_sentence_rationale]
+        ⏱️ Valid Until: [timeframe_or_key_level]
+        📊 Confidence: [high/medium/low]
+
+        ✅ Strengths: [bullish_factors] 
+        ⛔ Weaknesses: [bearish_factors]
+        🔮 Next Decision Point: [key_level/time_event]
+
+        (Not financial advice - DYOR)
+
+        ### Analysis Data:
+        1. Price Action: {data_json}
+        2. Order Book: {order_book_snapshot_json}
+        3. Model Confidence: {confidence_score}/100
+        4. Volume Analysis: [volume_commentary]
+        5. Liquidity: [liquidity_assessment]
+        """
+        # Send to DeepSeek API
+        response = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a professional trading analyst specializing in leveraged trading. Generate concise reports in plain text with clear sections. Use emojis for visual organization but no markdown formatting. All numbers to 2 decimals. Focus on leverage-specific risks and opportunities."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.3
+            },
+            headers={"Authorization": f"Bearer {DEEP_SEEK_API_KEY}"}
+        )
+
+        if response.status_code == 200:
+            analysis = response.json()["choices"][0]["message"]["content"]
+            
+            # Store in Redis for 20 minutes (1200 seconds)
+            await redis_client.set(cache_key, analysis, ex=1200)
+
+            await send_bot_message(token, analysis)
+            print("✅ Analysis sent successfully!")
+        else:
+            print(f"❌ Error in API response: {response.status_code} - {response.text}")
+            analysis_translated = translate(f"❌ Error API response: {response.status_code} - {response.text}", target_lang)
+            await send_bot_message(token, analysis_translated)
+
+    except Exception as e:
+        logger.error(f"Error processing {interval}: {e}")
+        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))        
+        
+    finally:
+        if model_downloaded and not is_model_fresh(local_model_path):
+            os.remove(local_model_path)
+
+    return analysis
+
