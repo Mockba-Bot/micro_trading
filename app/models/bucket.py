@@ -57,7 +57,7 @@ def upload_model(bucket_name, key, local_path):
 # Cache implementation for bucket models
 # 
 # 
-MODEL_CACHE_DURATION = 86400  # 24 hours in seconds
+MODEL_CACHE_DURATION = 3600  # 24 hours in seconds
 
 def is_model_fresh(path: str) -> bool:
     if not os.path.exists(path):
