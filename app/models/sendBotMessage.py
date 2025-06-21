@@ -8,7 +8,7 @@ load_dotenv(dotenv_path=".env.micro.trading")
 
 MICRO_CENTRAL_URL = os.getenv("MICRO_CENTRAL_URL")  # Your micro central URL
 
-async def send_bot_message(token, message):
+async def send_bot_message(token, message, parse_mode="HTML"):
     url = f"{MICRO_CENTRAL_URL}/send_notification"
     payload = {
         "token": token,

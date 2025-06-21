@@ -469,9 +469,9 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
     print('Getting data for analysis') 
     features = get_features_by_indicator(interval, feature)
     analysis_translated = None
-    model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
-    MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
-    local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
+    # model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
+    # MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
+    # local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
 
     cache_key = f"analize_asset_analysis:{asset}:{interval}"
     
@@ -486,61 +486,61 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
     model_downloaded = False
 
     # ✅ Check if model is fresh or needs download
-    if not is_model_fresh(local_model_path):
-        if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-            model_downloaded = True
-        else:
-            message = f"❌ Model not found for {asset} {interval} with features {features}"
-            translated_message = translate(message, target_lang)
-            await send_bot_message(token, translated_message)
-            return translated_message
-    else:
-        model_downloaded = True
+    # if not is_model_fresh(local_model_path):
+    #     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+    #         model_downloaded = True
+    #     else:
+    #         message = f"❌ Model not found for {asset} {interval} with features {features}"
+    #         translated_message = translate(message, target_lang)
+    #         await send_bot_message(token, translated_message)
+    #         return translated_message
+    # else:
+    #     model_downloaded = True
 
     try:
         data = fetch_historical_orderly(asset, interval)
         
         # --- Step 1: Analyze data and prepare for prediction ---
-        model_metadata = joblib.load(local_model_path)
-        model = model_metadata["model"]
-        used_features = model_metadata.get("used_features", [])
+        # model_metadata = joblib.load(local_model_path)
+        # model = model_metadata["model"]
+        # used_features = model_metadata.get("used_features", [])
 
         # Add missing features to the dataset
-        missing_features = [f for f in used_features if f not in data.columns]
+        missing_features = [f for f in features if f not in data.columns]
         if missing_features:
-            data = add_indicators(data, missing_features)
+             data = add_indicators(data, missing_features)
 
         # Ensure dataset contains only trained features and in correct order
-        data = data[used_features].dropna().copy()
+        # data = data[used_features].dropna().copy()
 
         # --- Predict class probabilities
-        y_proba = model.predict_proba(data[features])
-        proba_df = pd.DataFrame(y_proba, columns=model.classes_)
+        # y_proba = model.predict_proba(data[features])
+        # proba_df = pd.DataFrame(y_proba, columns=model.classes_)
 
         # --- Generate predictions ---
-        target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
-        if market_bias == 'bullish':
-            target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
-        elif market_bias == 'bearish':
-            target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}
+        # target_fraction = {-1: 0.35, 1: 0.15, 0: 0.5}
+        # if market_bias == 'bullish':
+        #     target_fraction = {-1: 0.2, 1: 0.3, 0: 0.5}
+        # elif market_bias == 'bearish':
+        #     target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}
 
-        n_samples = len(proba_df)
-        target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
+        # n_samples = len(proba_df)
+        # target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
 
-        y_custom = np.zeros(n_samples, dtype=int)
-        for cls in [-1, 1]:
-            top_indices = proba_df[cls].nlargest(target_counts[cls]).index
-            y_custom[top_indices] = cls
+        # y_custom = np.zeros(n_samples, dtype=int)
+        # for cls in [-1, 1]:
+        #     top_indices = proba_df[cls].nlargest(target_counts[cls]).index
+        #     y_custom[top_indices] = cls
 
-        data['predicted'] = y_custom
-        data['close_pct_change'] = data['close'].pct_change()
+        # data['predicted'] = y_custom
+        # data['close_pct_change'] = data['close'].pct_change()
         
         # Get current market data
         current_price = data['close'].iloc[-1]
-        last_3_predictions = data['predicted'].tail(3).tolist()
-        current_prediction = data['predicted'].iloc[-1]
-        confidence_score = int(proba_df.max(axis=1).iloc[-1] * 100)
-        confidence_level = "High" if confidence_score > 70 else "Medium" if confidence_score > 50 else "Low"
+        # last_3_predictions = data['predicted'].tail(3).tolist()
+        # current_prediction = data['predicted'].iloc[-1]
+        # confidence_score = int(proba_df.max(axis=1).iloc[-1] * 100)
+        # confidence_level = "High" if confidence_score > 70 else "Medium" if confidence_score > 50 else "Low"
 
         # --- Order Book Analysis ---
         order_book_snapshot = fetch_order_book_snapshot(asset)
@@ -558,14 +558,12 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
         **Language:** Respond in {language} language.
         **Task:** Generate a professional trading analysis for {asset} {interval} with {leverage}x leverage in the exact format specified below and optimize for Telegram.
         
-        **Contextual Preference:** If technical indicators, model signals, or trend data point toward a clear bullish or bearish setup, prioritize a LONG or SHORT recommendation over HOLD. HOLD should only be used if signals are genuinely conflicting or inconclusive. Be decisive when confidence is medium to high.
+        **Contextual Preference:** If technical indicators, trend data point toward a clear bullish or bearish setup, prioritize a LONG or SHORT recommendation over HOLD. HOLD should only be used if signals are genuinely conflicting or inconclusive. Be decisive when confidence is medium to high.
         
         ### Required Format:
         [Asset/Timeframe] Technical Analysis - {feature}
         🔹 Current Price: {current_price}
         🔸 Market Phase: [trending/consolidating/reversing]
-        🔸 Signals: 1 Buy, -1 Sell, 0 Hold
-        🔸 Last Signals: {last_3_predictions} → Current: {current_prediction} ({confidence_level} confidence)
         🔸 Active Indicators: {features}
 
         📊 Key Indicators (Using: {feature})
@@ -627,7 +625,6 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
         ### Analysis Data:
         1. Price Action: {data_json}
         2. Order Book: {order_book_snapshot_json}
-        3. Model Confidence: {confidence_score}/100
         4. Volume Analysis: [volume_commentary]
         5. Liquidity: [liquidity_assessment]
         """
@@ -639,7 +636,7 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a professional trading analyst specializing in leveraged trading. Generate concise reports in plain text with clear sections. Use emojis for visual organization but no markdown formatting. All numbers to 2 decimals. Focus on leverage-specific risks and opportunities."
+                        "content": "You are a professional trading analyst specializing in leveraged trading. Generate concise reports in plain text with clear sections. use PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). All numbers to 2 decimals. Focus on leverage-specific risks and opportunities."
                     },
                     {
                         "role": "user",
@@ -666,11 +663,11 @@ async def analize_asset(token, asset, interval, feature, leverage, target_lang, 
 
     except Exception as e:
         logger.error(f"Error processing {interval}: {e}")
-        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))        
+        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", target_lang))        
         
-    finally:
-        if model_downloaded and not is_model_fresh(local_model_path):
-            os.remove(local_model_path)
+    # finally:
+    #     if model_downloaded and not is_model_fresh(local_model_path):
+    #         os.remove(local_model_path)
 
     return analysis
 

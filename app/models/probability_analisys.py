@@ -586,9 +586,9 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
     print('Getting data for analysis') 
     features = get_features_by_indicator(interval, feature)
     analysis_translated = None
-    model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
-    MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
-    local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
+    # model_name = "_".join(features).replace("[", "").replace("]", "").replace("'", "_").replace(" ", "")
+    # MODEL_KEY = f'Mockba/trained_models/trained_model_{asset}_{interval}_{model_name}.joblib'
+    # local_model_path = f'temp/trained_model_{asset}_{interval}_{model_name}.joblib'
 
     cache_key = f"analize_probability_asset_analysis:{asset}:{interval}"
     
@@ -596,20 +596,20 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
     cached = await redis_client.get(cache_key)
     if cached:
         analysis_translated = translate(cached.decode(), target_lang)
-        await send_bot_message(token, analysis_translated)
+        await send_bot_message(token, cached.decode())
         return cached.decode()
 
      # ✅ Check if model is fresh or needs download
-    if not is_model_fresh(local_model_path):
-        if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-            model_downloaded = True
-        else:
-            message = f"❌ Model not found for {asset} {interval} with features {features}"
-            translated_message = translate(message, target_lang)
-            await send_bot_message(token, translated_message)
-            return translated_message
-    else:
-        model_downloaded = True
+    # if not is_model_fresh(local_model_path):
+    #     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+    #         model_downloaded = True
+    #     else:
+    #         message = f"❌ Model not found for {asset} {interval} with features {features}"
+    #         translated_message = translate(message, target_lang)
+    #         await send_bot_message(token, translated_message)
+    #         return translated_message
+    # else:
+    #     model_downloaded = True
     try:
         # --- Data Preparation ---
         data = fetch_historical_orderly(asset, interval)
@@ -622,11 +622,11 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
         current_funding = await get_funding_rate(asset)
         
         # --- Model Predictions ---
-        model_metadata = joblib.load(local_model_path)
-        model = model_metadata["model"]
-        used_features = model_metadata.get("used_features", [])
+        # model_metadata = joblib.load(local_model_path)
+        # model = model_metadata["model"]
+        # used_features = model_metadata.get("used_features", [])
 
-        missing_features = [f for f in used_features if f not in data.columns]
+        missing_features = [f for f in features if f not in data.columns]
         if missing_features:
             data = add_indicators(data, missing_features)
 
@@ -656,10 +656,10 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
             confirmation_guidance += "- If MACD is bearish, do not suggest bullish divergence.\n"
         confirmation_guidance += "- Reference only actual values shown in the snapshot."
 
-        data = data[used_features].dropna().copy()
+        # data = data[used_features].dropna().copy()
 
-        y_proba = model.predict_proba(data[features])
-        proba_df = pd.DataFrame(y_proba, columns=model.classes_)
+        # y_proba = model.predict_proba(data[features])
+        # proba_df = pd.DataFrame(y_proba, columns=model.classes_)
 
         data = prob_engine.calculate_advanced_scenarios(data)
         scenario_probs = {
@@ -675,7 +675,7 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
             } for side, probs in scenario_probs.items()
         }
 
-        confidence_level, confidence_score = prob_engine.calculate_confidence(proba_df, current_funding)
+        # confidence_level, confidence_score = prob_engine.calculate_confidence(proba_df, current_funding)
         liq_risk = prob_engine.monte_carlo_liquidation(
             price=data['close'].iloc[-1],
             atr=data['atr_14'].iloc[-1],
@@ -689,14 +689,14 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
         elif market_bias == 'bearish':
             target_fraction = {-1: 0.4, 1: 0.1, 0: 0.5}
 
-        n_samples = len(proba_df)
-        target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
-        y_custom = np.zeros(n_samples, dtype=int)
-        for cls in [-1, 1]:
-            top_indices = proba_df[cls].nlargest(target_counts[cls]).index
-            y_custom[top_indices] = cls
-        data['predicted'] = y_custom
-        current_prediction = data['predicted'].iloc[-1]
+        # n_samples = len(proba_df)
+        # target_counts = {cls: int(n_samples * frac) for cls, frac in target_fraction.items()}
+        # y_custom = np.zeros(n_samples, dtype=int)
+        # for cls in [-1, 1]:
+        #     top_indices = proba_df[cls].nlargest(target_counts[cls]).index
+        #     y_custom[top_indices] = cls
+        # data['predicted'] = y_custom
+        # current_prediction = data['predicted'].iloc[-1]
 
         # get the language for the bot
         language = get_language(target_lang)
@@ -718,8 +718,6 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
         👉 *SHORT Targets*:
         {chr(10).join([f"{k} → {scenario_probs['short'][k]:.1%} | 🎯 Size: {kelly_sizes['short'][k]:.2f}x" for k in scenario_probs['short']])}
 
-        ⚡ *Signal*: {'🟢 STRONG LONG' if current_prediction == 1 else '🔴 STRONG SHORT' if current_prediction == -1 else '🟡 NEUTRAL'} 
-        📊 Confidence: {confidence_score}% {'✅ High' if confidence_score > 70 else '⚠️ Medium' if confidence_score > 50 else '❌ Low'}
         🔄 Market Bias: {market_bias.upper()} {'🐂' if market_bias == 'bullish' else '🐻' if market_bias == 'bearish' else '🦉'}
 
         💎 *Strategic Recommendation*
@@ -742,6 +740,7 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
         • Max position: {min(max(kelly_sizes['long'].values()) + max(kelly_sizes['short'].values()), leverage):.1f}x
         • 📅 Data points: {len(data)} samples
         • ⚠️ Always use stop-loss!
+        • Use language for message {language}.
         """
 
         response = requests.post(
@@ -778,10 +777,10 @@ async def analize_probability_asset(token, asset, interval, feature, leverage, t
 
     except Exception as e:
         logger.error(f"Error processing {interval}: {e}")
-        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))         
+        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", target_lang))         
         
-    finally:
-        if model_downloaded and not is_model_fresh(local_model_path):
-            os.remove(local_model_path)
+    # finally:
+    #     if model_downloaded and not is_model_fresh(local_model_path):
+    #         os.remove(local_model_path)
 
     return analysis

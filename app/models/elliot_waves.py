@@ -273,8 +273,8 @@ def is_valid_elliott_structure_from_pivots(data, verbose=False):
 
 # Function to analyze multiple intervals and return explanations using XGBRegressor
 async def analyze_intervals(asset, token, interval, target_lang):
-    look_back = 60
-    future_steps = 10
+    # look_back = 60
+    # future_steps = 10
     analysis_translated = None
 
     cache_key = f"analyze_intervals_analysis:{asset}:{interval}"
@@ -285,21 +285,21 @@ async def analyze_intervals(asset, token, interval, target_lang):
         await send_bot_message(token, cached.decode())
         return cached.decode()
 
-    MODEL_KEY = f'Mockba/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
-    local_model_path = f'temp/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
-    model_downloaded = False
+    # MODEL_KEY = f'Mockba/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
+    # local_model_path = f'temp/elliot_waves_trained_models/{asset}_{interval}_elliot_waves_model.joblib'
+    # model_downloaded = False
 
     # ✅ Check local model freshness or download
-    if not is_model_fresh(local_model_path):
-        if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
-            model_downloaded = True
-        else:
-            message = f"❌ Model not found for {asset} {interval}"
-            translated_message = translate(message, target_lang)
-            await send_bot_message(token, translated_message)
-            return translated_message
-    else:
-        model_downloaded = True
+    # if not is_model_fresh(local_model_path):
+    #     if download_model(BUCKET_NAME, MODEL_KEY, local_model_path):
+    #         model_downloaded = True
+    #     else:
+    #         message = f"❌ Model not found for {asset} {interval}"
+    #         translated_message = translate(message, target_lang)
+    #         await send_bot_message(token, translated_message)
+    #         return translated_message
+    # else:
+    #     model_downloaded = True
 
     # ✅ Now always run analysis regardless of fresh or just-downloaded model
     try:
@@ -312,47 +312,45 @@ async def analyze_intervals(asset, token, interval, target_lang):
                 f"⚠️ Weak or invalid Elliott structure for {asset} ({interval})\n"
                 f"Score: {wave_result['score']:.2f} | Direction: {wave_result['direction'] or 'unknown'}"
             )
-            await send_bot_message(token, translate(message, target_lang))
+            translated_message = translate(message, target_lang)
+            await redis_client.set(cache_key, translated_message, ex=1200)
+            await send_bot_message(token, translated_message)
             # Optional: return here to skip ML prediction if invalid
 
         # Normalize
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_data = scaler.fit_transform(data['close'].values.reshape(-1, 1))
+        # scaler = MinMaxScaler(feature_range=(0, 1))
+        # scaled_data = scaler.fit_transform(data['close'].values.reshape(-1, 1))
 
-        X, Y = create_rf_dataset(scaled_data, look_back)
-        X = X.reshape(X.shape[0], -1)
+        # X, Y = create_rf_dataset(scaled_data, look_back)
+        # X = X.reshape(X.shape[0], -1)
 
-        model = joblib.load(local_model_path)
-        predictions = model.predict(X)
+        # model = joblib.load(local_model_path)
+        # predictions = model.predict(X)
 
         # Predict future prices
-        future_inputs = X[-1].reshape(1, -1)
-        future_predictions = []
-        for _ in range(future_steps):
-            future_price = model.predict(future_inputs)
-            future_predictions.append(future_price[0])
-            future_inputs = np.roll(future_inputs, -1)
-            future_inputs[0, -1] = future_price
+        # future_inputs = X[-1].reshape(1, -1)
+        # future_predictions = []
+        # for _ in range(future_steps):
+        #     future_price = model.predict(future_inputs)
+        #     future_predictions.append(future_price[0])
+        #     future_inputs = np.roll(future_inputs, -1)
+        #     future_inputs[0, -1] = future_price
 
-        future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
-        predicted_labels = (predictions > np.mean(predictions)).astype(int)
+        # future_predictions = scaler.inverse_transform(np.array(future_predictions).reshape(-1, 1)).flatten()
+        # predicted_labels = (predictions > np.mean(predictions)).astype(int)
 
         data_json = json.dumps(data.to_dict(orient='records'))
-        future_predictions_json = json.dumps(future_predictions.tolist())
-        predicted_labels_json = json.dumps(predicted_labels.tolist())
+        # future_predictions_json = json.dumps(future_predictions.tolist())
+        # predicted_labels_json = json.dumps(predicted_labels.tolist())
         language = get_language(target_lang)
 
         prompt = f"""
         **Language:** Respond in {language} language.
-        **Task:** Generate a professional Elliott Wave analysis for {asset} ({interval}) with ML confirmation, optimized for Telegram traders.
+        **Task:** Generate a professional Elliott Wave analysis for {asset} ({interval}), optimized for Telegram traders.
 
         ###Input Data:
         1. Price Action:
         {data_json}
-
-        2. ML Signals:
-        - Trend: {future_predictions_json}
-        - Confidence: {predicted_labels_json}
 
         ###Analysis Rules:
         Explanation
@@ -364,10 +362,6 @@ async def analyze_intervals(asset, token, interval, target_lang):
             - Wave 3 is longest impulse wave
             - Wave 4 doesn't enter Wave 1 territory
         - ❌ Invalid if any rule breaks
-
-        3. ML Integration:
-        - Highlight confidence-weighted conflicts
-        - Flag high-probability reversals
 
         Output Format:
         🌊 {asset} {interval} | Elliot Waves Analysis
@@ -381,22 +375,19 @@ async def analyze_intervals(asset, token, interval, target_lang):
         📊 Key Levels:  
         - Buy Zone: [Level]  
         - Take Profit: [Level]  
-        - Stop Loss: [Level]  
-
-        🤖 ML Cross-Check:  
-        - Trend: [Bullish/Bearish] (X% confidence)  
-        - Alert: [None/"Warning: ML contradicts Wave 5"]  
+        - Stop Loss: [Level]   
 
         💬 Insight:  
-        "The current wave structure suggests [continuation/reversal] is likely, with ML providing [strong/weak] confirmation. The critical level to watch is [Price], where we expect [description of expected price action]. This creates a [high/medium] probability trading opportunity."
+        "The current wave structure suggests [continuation/reversal]. The critical level to watch is [Price], where we expect [description of expected price action]. This creates a [high/medium] probability trading opportunity."
 
         🚀 Final Verdict:  
-        "Based on the wave pattern and ML alignment, the recommended action is to [specific instruction] with defined risk management at [Level]. The next confirmation signal would be [price/condition], expected within [timeframe]."
+        "Based on the wave pattern, the recommended action is to [specific instruction] with defined risk management at [Level]. The next confirmation signal would be [price/condition], expected within [timeframe]."
 
         Rules:
         1. No markdown (**, `, ###, etc)
         2. Use simple dashes (-) for bullets
         3. Keep decimals consistent (2 places)
+        4. Use language for message {language}.
         """
 
         response = requests.post(
@@ -406,7 +397,7 @@ async def analyze_intervals(asset, token, interval, target_lang):
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals."
+                        "content": "You are a trading analyst. Generate concise Elliott Wave reports in PLAIN TEXT only (no markdown). Use emojis but no formatting (** or `). Keep numbers to 2 decimals. Respond in {language} language."
                     },
                     {
                         "role": "user",
@@ -427,11 +418,11 @@ async def analyze_intervals(asset, token, interval, target_lang):
 
     except Exception as e:
         logger.error(f"Error processing {interval}: {e}")
-        await send_bot_message(token, translate(f"An error occurred while analyzing {interval} interval: {e}", token))
+        await send_bot_message(token, f"An error occurred while analyzing {interval} interval: {e}")
 
-    finally:
-        if model_downloaded and not is_model_fresh(local_model_path):
-            os.remove(local_model_path)
+    # finally:
+    #     if model_downloaded and not is_model_fresh(local_model_path):
+    #         os.remove(local_model_path)
 
     return analysis
 
